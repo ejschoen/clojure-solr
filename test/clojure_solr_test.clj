@@ -217,3 +217,52 @@
     ))
         
   
+(deftest test-exclude-filter-faceting
+  (add-document! sample-doc)
+  (add-document! (assoc sample-doc :id 2 :type "docx"))
+  (commit!)
+  (let [docs (search "my"
+                     :facet-filters [{:name "type"
+                                      :value "pdf"
+                                      :full-formatter format-standard-filter-query
+                                      :tag "type"}]
+                     :facet-fields [{:name "type" :ex "type"}])
+        result (meta docs)
+        facet-fields (:facet-fields result)]
+    (is (= 1 (count docs)))
+    (is (= 1 (count facet-fields)))
+    (is (some #(= "type" (:name %)) facet-fields))
+    (is (= 2 (count (:values (first facet-fields)))))
+    (let [type-facet (group-by :value (:values (first facet-fields)))]
+      (is (= 1 (:count (first (get type-facet "pdf")))))
+      (is (= 1 (:count (first (get type-facet "docx"))))))))
+
+(deftest test-exclude-filter-faceting-complex
+  (add-document! sample-doc)
+  (add-document! (assoc sample-doc :id 2 :type "docx"))
+  (add-document! (assoc sample-doc :id 3 :type "pptx"))
+  (commit!)
+  (let [docs (search "my"
+                     :facet-filters [{:name "type"
+                                      :value "{!tag=type}(type:pdf OR type:docx)"
+                                      :full-formatter #(:value %)
+                                      :tag "type"}]
+                     :facet-fields [{:name "type" :ex "type"}])
+        result (meta docs)
+        facet-fields (:facet-fields result)]
+    (is (= 2 (count docs)))
+    (is (= 1 (count facet-fields)))
+    (is (some #(= "type" (:name %)) facet-fields))
+    (is (= 3 (count (:values (first facet-fields)))))
+    (let [type-facet (group-by :value (:values (first facet-fields)))]
+      (is (= 1 (:count (first (get type-facet "pptx")))))
+      (is (= 1 (:count (first (get type-facet "pdf")))))
+      (is (= 1 (:count (first (get type-facet "docx"))))))))
+
+(deftest test-solr-npe-from-bad-query
+  (clojure.pprint/pprint (meta (search "*:*"
+                                       :debugQuery true
+                                       :defType "edismax"
+                                       :facet-filters [{:name "complex" :value "(source:SemanticScholar%20Commercial%20Use%20Subset AND type:application/json;schema=semantic-scholar)"
+                                                        :formatter (fn [_ value] value)}]
+                                       :facet-fields [{:name "type" :ex "type"}]))))

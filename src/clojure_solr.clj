@@ -211,20 +211,28 @@
           :else (str val))))
 
 (defn format-standard-filter-query
-  [name value]
-  (format "%s:%s" name value))
+  ([name value]
+   (format "%s:%s" name value))
+  ([{:keys [name value tag] :as query}]
+   (if (not-empty tag)
+     (format "{!tag=%s}%s:%s" tag name value)
+     (format "%s:%s" name value))))
 
 (defn format-raw-query
-  [name value]
-  (format "{!raw f=%s}%s" name value))
+  ([query]
+   (if (not-empty (:tag query))
+     (format "{!raw f=%s tag=%s}%s" (:name query) (:tag query) (:value query))
+     (format-raw-query (:name query) (:value query))))
+  ([name value]
+   (format "{!raw f=%s}%s" name value)))
 
 (defn format-facet-query
-  [{:keys [name value formatter]}]
+  [{:keys [name value tag formatter full-formatter] :as query}]
   (if (and (string? value) (re-find #"\[" value)) ;; range filter
     (format-standard-filter-query name value)
-    (if formatter
-      (formatter name value)
-      (format-raw-query name value))))
+    (cond full-formatter (full-formatter query)
+          formatter (formatter name value)
+          :else (format-raw-query query))))
 
 (defn extract-facet-ranges
   "Explicitly pass facet-date-ranges in case one or more ranges are date ranges, and we need to grab a timezone."
@@ -370,6 +378,10 @@
 (def facet-exclude-parameters
   #{:name :result-formatter})
 
+(def facet-parameter-formatters
+  {:ex #(format "ex=%s" %2)
+   :default #(format "facet.%s=\"%s\"" (name %1) %2)})
+
 (defn search*
   "Query solr through solrj.
    q: Query field
@@ -379,7 +391,7 @@
      :start                 Offset into query result at which to start returning rows (default 0)
      :fields                Fields to return
      :facet-fields          Discrete-valued fields to facet.  Can be a string, keyword, or map containing
-                            {:name ... :prefix ...}.
+                            {:name ... :prefix ... :ex (to exclude from filtering)}.
      :facet-queries         Vector of facet queries, each encoded in a string or a map of
                             {:name, :value, :formatter}.  :formatter is optional and defaults to the raw query formatter.
                             The result is in the :facet-queries response.
@@ -398,7 +410,10 @@
      :facet-mincount        Minimum number of docs in a facet for the bucket to be returned.
      :facet-hier-sep        Useful for path hierarchy token faceting.  A regex, such as \\|.
      :facet-filters         Solr filter expression on facet values.  Passed as a map in the form:
-                            {:name 'facet-name' :value 'facet-value' :formatter (fn [name value] ...) }
+                            {:name 'facet-name' :value 'facet-value' 
+                             :formatter (fn [name value] ...)
+                             :full-formatter 'Alternative formatter, takes entire facet-filter map as one parameter'
+                             :tag 'Optional, for referencing in an ex-tag in facet-fields (needs full-formatter option)' }
                             where :formatter is optional and is used to format the query.
      :facet-pivot-fields    Vector of pivots to compute, each a list of facet fields.
                             If a facet is tagged (e.g., {:tag ts} in :facet-date-ranges)  
@@ -454,9 +469,10 @@
             (if (map? facet-field)
               (let [local-params
                     (reduce-kv (fn [params k v]
-                                 (if (facet-exclude-parameters k)
-                                   params
-                                   (format "%s facet.%s=\"%s\"" params (name k) v)))
+                                 (let [formatter (get facet-parameter-formatters k (get facet-parameter-formatters :default))]
+                                   (if (facet-exclude-parameters k)
+                                     params
+                                     (format "%s %s" params (formatter k v)))))
                                (format "!key=%s" key)
                                facet-field)]
                 (format "{%s}%s" local-params field-name))
