@@ -11,13 +11,13 @@
            (org.apache.http.auth AuthScope UsernamePasswordCredentials)
            (org.apache.http.client.protocol HttpClientContext)
            (org.apache.http.impl.auth BasicScheme)
-           (org.apache.http.impl.client BasicCredentialsProvider HttpClientBuilder)
+           (org.apache.http.impl.client BasicCredentialsProvider HttpClientBuilder CloseableHttpClient)
            (org.apache.http.protocol HttpContext HttpCoreContext)
            (org.apache.solr.client.solrj SolrQuery SolrRequest$METHOD)
-           (org.apache.solr.client.solrj.impl HttpSolrClient HttpClientUtil)
+           (org.apache.solr.client.solrj.impl HttpSolrClient HttpSolrClient$Builder HttpClientUtil)
            (org.apache.solr.client.solrj.embedded EmbeddedSolrServer)
            (org.apache.solr.client.solrj.response QueryResponse FacetField PivotField RangeFacet RangeFacet$Count RangeFacet$Date)
-           (org.apache.solr.common SolrInputDocument)
+           (org.apache.solr.common SolrInputDocument SolrDocumentList)
            (org.apache.solr.common.params ModifiableSolrParams CursorMarkParams MoreLikeThisParams)
            (org.apache.solr.common.util NamedList)
            (org.apache.solr.util DateMathParser)))
@@ -96,8 +96,10 @@
                             ;;(println "**** CLOJURE-SOLR: HttpRequestInterceptor here.  Looking for" auth-scope)
                             (when creds
                               (.update auth-state (BasicScheme.) creds)))))))))
-        client (.build builder)]
-    (HttpSolrClient. clean-url client)))
+        client ^CloseableHttpClient (.build builder)
+        solr-builder ^HttpSolrClient$Builder (doto (HttpSolrClient$Builder. clean-url)
+                                               (.withHttpClient client))]
+    (.build solr-builder)))
 
 (defn- make-document [boost-map doc]
   (let [sdoc (SolrInputDocument. (make-array String 0))]
@@ -398,7 +400,7 @@
      :facet-date-ranges     Date fields to facet as a vector or maps.  Each map contains
                              :field   Field name
                              :tag     Optional, for referencing in a pivot facet
-                             :start   Earliest date (as java.util.Date)
+1                             :start   Earliest date (as java.util.Date)
                              :end     Latest date (as java.util.Date)
                              :gap     Faceting gap, as String, per Solr (+1HOUR, etc)
                              :others  Comma-separated string: before,after,between,none,all.  Optional.
@@ -421,16 +423,20 @@
                             use comma separated lists: this-facet,other-facet.
      :cursor-mark           true -- initial cursor; else a previous cursor value from 
                             (:next-cursor-mark (meta result))
+     :collapse              field name or map with CollapsingQParser parameters.
+     :expand                true or map with {:rows ... :q ... :fq ... :sort ... }
+                            for the ExpandComponent.
   Additional keys can be passed, using Solr parameter names as keywords.
   Returns the query results as the value of the call, with faceting results as metadata.
   Use (meta result) to get facet data."
   [q {:keys [method fields facet-fields facet-date-ranges facet-numeric-ranges facet-queries
-             facet-mincount facet-hier-sep facet-filters facet-pivot-fields cursor-mark] :as flags}]
+             facet-mincount facet-hier-sep facet-filters facet-pivot-fields cursor-mark
+             collapse expand] :as flags}]
   (when *trace-fn*
     (show-query q flags))
-  (let [query (cond (string? q) (SolrQuery. q)
-                    (instance? SolrQuery q) q
-                    :else (throw (Exception. "q parameter must be a string or SolrQuery")))
+  (let [^SolrQuery query (cond (string? q) (SolrQuery. q)
+                               (instance? SolrQuery q) q
+                               :else (throw (Exception. "q parameter must be a string or SolrQuery")))
         method (parse-method method)
         facet-result-formatters (into {} (map #(if (map? %)
                                                  [(:name %) (:result-formatter % identity)]
@@ -442,7 +448,9 @@
         facet-field-keys (into {} (map-indexed (fn [i f]
                                                  [(if (map? f) (:name f) (name f)) (format "f%d" i)])
                                                facet-fields))]
-    (doseq [[key value] (dissoc flags :method :facet-fields :facet-date-ranges :facet-numeric-ranges :facet-filters)]
+    (doseq [[key value] (dissoc flags
+                                :method :facet-fields :facet-date-ranges :facet-numeric-ranges :facet-filters
+                                :cursor-mark :collapse :expand)]
       (.setParam query (name key) (make-param value)))
     (when (not (empty? fields))
       (cond (string? fields)
@@ -528,14 +536,38 @@
           (.setParam query ^String (CursorMarkParams/CURSOR_MARK_PARAM) (into-array String [(CursorMarkParams/CURSOR_MARK_START)]))
           (not (nil? cursor-mark))
           (.setParam query ^String (CursorMarkParams/CURSOR_MARK_PARAM) (into-array String [cursor-mark])))
+
+    (when collapse
+      (cond (string? collapse)
+            (.addFilterQuery query (into-array String [(format "{!collapse field=%s}" collapse)]))
+            (map? collapse)
+            (.addFilterQuery query (into-array String [(format "{!collapse %s}"
+                                                               (str/join " "
+                                                                         (for [[key val] collapse]
+                                                                           (format "%s=%s" (name key) val))))]))
+            :else (throw (Exception. "collapse parameter must be string or map"))))
+    (when expand
+      (.setParam query "expand" true)
+      (cond (string? expand)
+            nil
+            (map? expand)
+            (doseq [[key val] expand]
+              (.setParam query (format "expand.%s" (name key)) (into-array String [(str val)])))
+            :else (throw (Exception. "expand parameter must be true or a map"))))
     (trace "Executing query")
-    (let [query-results (.query *connection* query method)
-          results (.getResults query-results)]
+    (let [^QueryResponse query-results (.query *connection* query method)
+          ^SolrDocumentList results (.getResults query-results)
+          expanded-results (when expand (.getExpandedResults query-results))]
       (trace "Query complete")
       (trace query-results)
       (when (:debugQuery flags)
         (trace (.getDebugMap query-results)))
-      (with-meta (map doc-to-hash results)
+      (with-meta
+        (if expand
+          (into {}
+                (for [[key docs] expanded-results]
+                  [key (map doc-to-hash docs)]))
+          (map doc-to-hash results))
         (merge
          (when cursor-mark
            (let [next  (.getNextCursorMark query-results)]

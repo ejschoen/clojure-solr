@@ -1,5 +1,7 @@
 (ns clojure-solr-test
-  (:require [clojure.pprint])
+  (:require [clojure.pprint]
+            [clojure.string :as str])
+  (:import (java.util.jar Manifest))
   (:import (org.apache.solr.client.solrj.embedded EmbeddedSolrServer))
   (:import (org.apache.solr.core CoreContainer))
   (:require [clj-time.core :as t])
@@ -7,6 +9,22 @@
   (:use [clojure.test])
   (:use [clojure-solr])
   (:use [clojure-solr.schema]))
+
+(defn get-solr-version
+  []
+  (let [name (format "%s.class" (.getSimpleName EmbeddedSolrServer))
+        resource (str (.getResource EmbeddedSolrServer name))]
+    (if (re-matches #"jar:.+" resource)
+      (let [manifest-name (str (subs resource 0 (inc (.lastIndexOf resource "!"))) "/META-INF/MANIFEST.MF")]
+        (with-open [s (.openStream (java.net.URL. manifest-name))]
+          (let [manifest (Manifest. s)
+                attrs (.getMainAttributes manifest)]
+            (.getValue attrs "Specification-Version")))))))
+
+(defn get-solr-home-dir
+  []
+  (let [version (get-solr-version)]
+    (str "test-files/solr-" (second (re-matches #"(\d+)\..*" version)))))
 
 ;; from: https://gist.github.com/edw/5128978
 (defn delete-recursively [fname]
@@ -17,17 +35,35 @@
                (try (clojure.java.io/delete-file f) (catch Exception _)))]
     (func func (clojure.java.io/file fname))))
 
+(defn make-solr-container
+  "This is complicated because we support multiple Solr versions that happen to have conflicting Constructor signatures
+   for CoreContainer, and Clojure-Java interop has issues at compilation time, even though a particular Constructor
+   invocation might never happen for a given Solr version."
+  []
+  (let [solr-version (get-solr-version)
+        major-version (second (re-matches #"(\d+)\..*" solr-version)) 
+        cont-expr (case (Integer/parseInt major-version)
+                    (6 7) `(CoreContainer.)
+                    8 (let [home-dir (get-solr-home-dir)]
+                        `(CoreContainer. (.getPath (java.nio.file.FileSystems/getDefault) ~home-dir (make-array String 0))
+                                         (doto (java.util.Properties.)
+                                           (.setProperty "solr.dist.dir"
+                                                         (str (System/getProperty "user.dir")
+                                                              "/test-files/dist"))))))]
+    (eval cont-expr)))
+
 (defn solr-server-fixture
   [f]
-  (delete-recursively "test-files/data")
-  (System/setProperty "solr.solr.home" "test-files")
-  (System/setProperty "solr.dist.dir" (str (System/getProperty "user.dir")
+  (let [home-dir (get-solr-home-dir)]
+    (delete-recursively (str home-dir "/data"))
+    (System/setProperty "solr.solr.home" home-dir)
+    (System/setProperty "solr.dist.dir" (str (System/getProperty "user.dir")
                                            "/test-files/dist"))
-  (let [cont (CoreContainer.)]
-    (.load cont)
-    (binding [*connection* (EmbeddedSolrServer. cont "clojure-solr")]
-      (f)
-      (.close *connection*))))
+    (let [cont (make-solr-container)]
+      (.load cont)
+      (binding [*connection* (EmbeddedSolrServer. cont "clojure-solr")]
+        (f)
+        (.close *connection*)))))
 
 (use-fixtures :each solr-server-fixture)
 
@@ -39,8 +75,8 @@
 (deftest test-add-document!
   (do (add-document! sample-doc)
       (commit!))
-  (is (= sample-doc (dissoc (first (search "my")) :_version_)))
-  (is (= {:start 0 :rows-set 1 :rows-total 1} (select-keys (meta (search "my"))
+  (is (= sample-doc (dissoc (first (search "my" :df "fulltext")) :_version_)))
+  (is (= {:start 0 :rows-set 1 :rows-total 1} (select-keys (meta (search "my"  :df "fulltext"))
                                                            [:start :rows-set :rows-total])))
   (is (= [{:name "terms"
            :values
@@ -51,28 +87,28 @@
             {:value "Vocabulary 2/Term X" :split-path ["Vocabulary 2" "Term X"] :title "Term X" :depth 2 :count 1}
             {:value "Vocabulary 2/Term X/Term Y" :split-path ["Vocabulary 2" "Term X" "Term Y"] :title "Term Y" :depth 3 :count 1}]}]
          (:facet-fields
-           (meta (search "my" :facet-fields [:terms] :facet-hier-sep #"/"))))))
+           (meta (search "my" :facet-fields [:terms] :facet-hier-sep #"/"  :df "fulltext"))))))
 
 (deftest test-update-document!
   (do (add-document! sample-doc)
       (commit!))
   (atomically-update! 1 :id [{:attribute :title :func :set :value "my new title"}])
   (commit!)
-  (let [search-result (search "my")]
+  (let [search-result (search "my"  :df "fulltext")]
     (is (= (get (first search-result) :title) "my new title"))))
   
 
 (deftest test-quoted-search
   (do (add-document! sample-doc)
       (commit!))
-  (is (= sample-doc (dissoc (first (search "\"my fulltext\"")) :_version_)))
-  (is (empty? (search "\"fulltext my\""))))
+  (is (= sample-doc (dissoc (first (search "\"my fulltext\""  :df "fulltext")) :_version_)))
+  (is (empty? (search "\"fulltext my\""  :df "fulltext"))))
 
 (deftest test-facet-query
   (do (add-document! sample-doc)
       (commit!))
   (is (= [{:name "terms" :value "Vocabulary 1" :count 1}]
-         (:facet-queries (meta (search "my" :facet-queries [{:name "terms" :value "Vocabulary 1"}]))))))
+         (:facet-queries (meta (search "my" :facet-queries [{:name "terms" :value "Vocabulary 1"}] :df "fulltext"))))))
 
 (deftest test-facet-prefix
   (do (add-document! sample-doc)
@@ -82,17 +118,20 @@
       (add-document! (assoc sample-doc :id "5" :numeric 8))
       (commit!))
   (let [result (meta (search "my"
-                             :facet-fields [{:name "terms" :prefix "Voc"}]))]
+                             :facet-fields [{:name "terms" :prefix "Voc"}]
+                             :df "fulltext"))]
     (is (not (empty? (:facet-fields result)))))
   (let [result (meta (search "my"
-                             :facet-fields [{:name "terms" :prefix "Vocabulary 1"}]))]
+                             :facet-fields [{:name "terms" :prefix "Vocabulary 1"}]
+                             :df "fulltext"))]
     (is (not (empty? (:facet-fields result))))
     (is (= 3 (count (-> result :facet-fields first :values))))
     (is (every? #(.startsWith (:value %) "Vocabulary 1")
                 (-> result :facet-fields first :values))))
   (let [result (meta (search "my"
                              :facet-fields [{:name "terms" :prefix "Vocabulary 1"
-                                             :result-formatter #(update-in % [:value] clojure.string/lower-case)}]))]
+                                             :result-formatter #(update-in % [:value] clojure.string/lower-case)}]
+                             :df "fulltext"))]
     (is (not (empty? (:facet-fields result))))
     (is (= 3 (count (-> result :facet-fields first :values))))
     (is (every? #(.startsWith (:value %) "vocabulary 1")
@@ -122,7 +161,8 @@
                                                                             (t/time-zone-for-id "America/Chicago")))
                                :gap      "+1DAY"
                                :timezone (t/time-zone-for-id "America/Chicago")
-                               :others   ["before" "after"]}]))]
+                               :others   ["before" "after"]}]
+                              :df "fulltext"))]
     (is (= {:name "numeric",
             :values
             [{:count 1,
@@ -163,6 +203,7 @@
   (add-document! (assoc sample-doc :id 2 :type "docx"))
   (commit!)
   (let [result (meta (search "my"
+                             :df "fulltext"
                              :rows 0
                              :facet-date-ranges
                              [{:field    "updated"
@@ -222,6 +263,7 @@
   (add-document! (assoc sample-doc :id 2 :type "docx"))
   (commit!)
   (let [docs (search "my"
+                     :df "fulltext"
                      :facet-filters [{:name "type"
                                       :value "pdf"
                                       :full-formatter format-standard-filter-query
@@ -243,6 +285,7 @@
   (add-document! (assoc sample-doc :id 3 :type "pptx"))
   (commit!)
   (let [docs (search "my"
+                     :df "fulltext"
                      :facet-filters [{:name "type"
                                       :value "{!tag=type}(type:pdf OR type:docx)"
                                       :full-formatter #(:value %)
@@ -261,6 +304,7 @@
 
 (deftest test-solr-npe-from-bad-query
   (clojure.pprint/pprint (meta (search "*:*"
+                                       :df "fulltext"
                                        :debugQuery true
                                        :defType "edismax"
                                        :facet-filters [{:name "complex" :value "(source:SemanticScholar%20Commercial%20Use%20Subset AND type:application/json;schema=semantic-scholar)"

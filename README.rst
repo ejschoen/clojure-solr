@@ -12,14 +12,18 @@ project.clj file:
 
 ::
 
-    [cc.artifice/clojure-solr "2.0.0"]
+    [cc.artifice/clojure-solr "3.0.0"]
 
+Note: Starting with release 3.0.0, Clojure and Solr dependencies are not part of the basic project definition.
+Use lein with-profile +1.8,+solr7 repl (or test) for example to include Clojure 1.8 and Solr 7.7.3 dependencies.
+
+Use :classifier option solr6, solr7, or solr8 in other Leiningen projects to get the appropriate builds,
+and provide Clojure and Solr (solr-core, solr-solrj) dependencies in the project that uses clojure-solr.
 
 To build from source, run:
 
 ::
 
-    lein deps
     lein jar
 
 Usage

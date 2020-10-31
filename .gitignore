@@ -3,8 +3,8 @@
 lib/
 .cake/
 pom.xml
-test-files/data
-test-files/dist
+test-files/solr-*/data
+test-files/solr-*/dist
 .idea/
 .lein*
 target/
