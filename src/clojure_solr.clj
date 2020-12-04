@@ -32,6 +32,21 @@
 
 (declare make-param)
 
+(def default-method (atom :post))
+
+(def http-methods {:get SolrRequest$METHOD/GET, :GET SolrRequest$METHOD/GET
+                   :post SolrRequest$METHOD/POST, :POST SolrRequest$METHOD/POST})
+
+(defn set-default-method!
+  [method]
+  (if (get http-methods method)
+    (reset! default-method method)
+    (throw (Exception. (format "Invalid Solr HTTP method: %s" method)))))
+
+(defn get-default-method
+  []
+  @default-method)
+
 (defn trace
   [str]
   (when *trace-fn*
@@ -138,11 +153,8 @@
    (coll? p) (into-array String (map str p))
    :else (into-array String [(str p)])))
 
-(def http-methods {:get SolrRequest$METHOD/GET, :GET SolrRequest$METHOD/GET
-                   :post SolrRequest$METHOD/POST, :POST SolrRequest$METHOD/POST})
-
 (defn- parse-method [method]
-  (get http-methods method SolrRequest$METHOD/GET))
+  (get http-methods method (get http-methods @default-method)))
 
 (defn extract-facets
   [query-results facet-hier-sep limiting? formatters key-fields]
@@ -599,6 +611,7 @@
           :facet-queries (extract-facet-queries facet-queries (.getFacetQuery query-results))
           :facet-pivot-fields (extract-pivots query-results facet-date-ranges)
           :results-obj results
+          :query query
           :query-results-obj query-results})))))
   
 (defn search

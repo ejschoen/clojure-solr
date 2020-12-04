@@ -8,7 +8,10 @@
   (:require [clj-time.coerce :as tcoerce])
   (:use [clojure.test])
   (:use [clojure-solr])
-  (:use [clojure-solr.schema]))
+  (:use [clojure-solr.security])
+  (:use [clojure-solr.schema])
+  (:import [java.nio.charset StandardCharsets]
+           [org.apache.commons.codec.binary Base64]))
 
 (defn get-solr-version
   []
@@ -310,3 +313,20 @@
                                        :facet-filters [{:name "complex" :value "(source:SemanticScholar%20Commercial%20Use%20Subset AND type:application/json;schema=semantic-scholar)"
                                                         :formatter (fn [_ value] value)}]
                                        :facet-fields [{:name "type" :ex "type"}]))))
+
+(deftest test-make-security-json-data
+  (let [data (make-security-json-data [["i2kweb" nil "query"] ["i2kconduit-db" nil "upload"]]
+                                      [{:name "read" :role "*"} {:name "schema-read" :role "*"} {:name "update" :role "upload"}])]
+    (is (:credentials data))
+    (is (:authorization data))
+    (is (:authentication data))
+    (is (get-in data [:credentials "i2kweb" :hashed-password]))
+    (is (get-in data [:credentials "i2kweb" :salt]))
+    (is (get-in data [:credentials "i2kweb" :cleartext-password]))
+    (is (= (get-in data [:credentials "i2kweb" :hashed-password])
+           (:hashed-password
+            (generate-salted-hash
+             (.getBytes (get-in data [:credentials "i2kweb" :cleartext-password])
+                        StandardCharsets/UTF_8)
+             (Base64/decodeBase64
+              (get-in data [:credentials "i2kweb" :salt]))))))))
