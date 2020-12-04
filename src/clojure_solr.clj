@@ -13,7 +13,7 @@
            (org.apache.http.impl.auth BasicScheme)
            (org.apache.http.impl.client BasicCredentialsProvider HttpClientBuilder CloseableHttpClient)
            (org.apache.http.protocol HttpContext HttpCoreContext)
-           (org.apache.solr.client.solrj SolrQuery SolrRequest$METHOD)
+           (org.apache.solr.client.solrj SolrQuery SolrRequest$METHOD SolrClient)
            (org.apache.solr.client.solrj.impl HttpSolrClient HttpSolrClient$Builder HttpClientUtil)
            (org.apache.solr.client.solrj.embedded EmbeddedSolrServer)
            (org.apache.solr.client.solrj.response QueryResponse FacetField PivotField RangeFacet RangeFacet$Count RangeFacet$Date)
@@ -22,11 +22,10 @@
            (org.apache.solr.common.util NamedList)
            (org.apache.solr.util DateMathParser)))
 
-(def ^:private url-details (atom {}))
-(def ^:private credentials-provider (BasicCredentialsProvider.))
-(def ^:private credentials (atom {}))
+(defonce ^:private url-details (atom {}))
+(defonce ^{:private true :tag BasicCredentialsProvider}  credentials-provider (BasicCredentialsProvider.))
 
-(declare ^:dynamic *connection*)
+(declare ^{:dynamic true :tag HttpSolrClient} *connection*)
 
 (def ^:dynamic *trace-fn* nil)
 
@@ -38,12 +37,14 @@
                    :post SolrRequest$METHOD/POST, :POST SolrRequest$METHOD/POST})
 
 (defn set-default-method!
+  "Set the default method for Solr requests."
   [method]
   (if (get http-methods method)
     (reset! default-method method)
     (throw (Exception. (format "Invalid Solr HTTP method: %s" method)))))
 
 (defn get-default-method
+  "Get the current default method for Solr requests."
   []
   @default-method)
 
@@ -57,6 +58,10 @@
   `(binding [*trace-fn* ~fn]
      ~@body))
 
+;; These next credential functions are for setting basic auth
+;; when needing to access Solr behind a proxy such as
+;; apache2 or nginx.
+;; However, these are also compatible with the BasicAuthenticationPlugin.
 (defn make-basic-credentials
   [name password]
   (UsernamePasswordCredentials. name password))
@@ -65,7 +70,13 @@
   [host port]
   (AuthScope. host port))
 
+(defn clear-credentials
+  "Remove *all* basic authentication credentials for all Solr URIs."
+  []
+  (.clear credentials-provider))
+
 (defn set-credentials
+  "Set basic authentication credentials for a given Solr URI."
   [uri name password]
   (.setCredentials credentials-provider
                    (make-auth-scope (.getHost uri) (.getPort uri))
@@ -89,11 +100,14 @@
                        (str (.getScheme uri) "://" (.getHost uri))
                        (str (.getScheme uri) "://" (.getHost uri) ":" (.getPort uri)))]
             ;;(println "**** CLOJURE-SOLR: Adding credentials for host" host)
-            (set-credentials uri name password)
-            (swap! credentials assoc host {:name name :password password})))
+            (set-credentials uri name password)))
         details))))
 
-(defn connect [url & conn-manager]
+(defn ^HttpSolrClient connect [url & conn-manager]
+  "Create an HttpSolrClient connection to a Solr URI. Optionally use
+   a provided connection-manager, such as PoolingHttpClientConnectionManager,
+   for situations where Solr's default connection manager cannot keep up
+   with demand."
   (let [params (ModifiableSolrParams.)
         {:keys [clean-url name password]} (get-url-details url)
         builder (doto (HttpClientBuilder/create)
@@ -117,7 +131,7 @@
     (.build solr-builder)))
 
 (defn- make-document [boost-map doc]
-  (let [sdoc (SolrInputDocument. (make-array String 0))]
+  (let [^SolrInputDocument sdoc (SolrInputDocument. (make-array String 0))]
     (doseq [[key value] doc]
       (let [key-string (name key)
             boost (get boost-map key)]
@@ -128,18 +142,18 @@
 
 (defn add-document!
   ([doc boost-map]
-   (.add *connection* (make-document boost-map doc)))
+   (.add ^SolrClient *connection* (make-document boost-map doc)))
   ([doc]
    (add-document! doc {})))
 
 (defn add-documents!
   ([coll boost-map]
-   (.add *connection* (map (partial make-document boost-map) coll)))
+   (.add ^SolrClient *connection* (map (partial make-document boost-map) coll)))
   ([coll]
    (add-documents! coll {})))
 
 (defn commit! []
-  (.commit *connection*))
+  (.commit ^SolrClient *connection*))
 
 (defn- doc-to-hash [doc]
   (into {} (for [[k v] (clojure.lang.PersistentArrayMap/create doc)]
@@ -153,7 +167,7 @@
    (coll? p) (into-array String (map str p))
    :else (into-array String [(str p)])))
 
-(defn- parse-method [method]
+(defn- ^SolrRequest$METHOD parse-method [method]
   (get http-methods method (get http-methods @default-method)))
 
 (defn extract-facets
@@ -567,7 +581,9 @@
               (.setParam query (format "expand.%s" (name key)) (into-array String [(str val)])))
             :else (throw (Exception. "expand parameter must be true or a map"))))
     (trace "Executing query")
-    (let [^QueryResponse query-results (.query *connection* query method)
+    (let [^QueryResponse query-results (.query ^SolrClient *connection*
+                                               ^SolrQuery query
+                                               ^SolrRequest$METHOD method)
           ^SolrDocumentList results (.getResults query-results)
           expanded-results (when expand (.getExpandedResults query-results))]
       (trace "Query complete")
@@ -664,19 +680,19 @@
    e.g.
      (atomically-update! doc \"cdid\" [{:attribute :client :func :set :value \"darcy\"}])"
   [doc unique-key-field changes]
-  (let [document (SolrInputDocument. (make-array String 0))]
+  (let [^SolrInputDocument document (SolrInputDocument. (make-array String 0))]
     (.addField document (name unique-key-field) (if (map? doc) (get doc unique-key-field) doc))
     (doseq [{:keys [attribute func value]} changes]
       (.addField document (name attribute) (doto (HashMap. 1) (.put (name func) value))))
-    (.add *connection* document)))
+    (.add ^SolrClient *connection* document)))
   
 (defn similar [doc similar-count & {:keys [method]}]
-  (let [query (SolrQuery. (format "id:%d" (:id doc)))
+  (let [^SolrQuery query (SolrQuery. (format "id:%d" (:id doc)))
         method (parse-method method)]
     (.setParam query "mlt" (make-param true))
     (.setParam query "mlt.fl" (make-param "fulltext"))
     (.setParam query "mlt.count" (make-param similar-count))
-    (let [query-results (.query *connection* query method)]
+    (let [query-results (.query ^SolrClient *connection* query method)]
       (map doc-to-hash (.get (.get (.getResponse query-results) "moreLikeThis") (str (:id doc)))))))
 
 (defn more-like-this
@@ -746,10 +762,10 @@
     (map doc-to-hash (:results-obj (meta query-results)))))
 
 (defn delete-id! [id]
-  (.deleteById *connection* id))
+  (.deleteById ^SolrClient *connection* id))
 
 (defn delete-query! [q]
-  (.deleteByQuery *connection* q))
+  (.deleteByQuery ^SolrClient *connection* q))
 
 (defn data-import [type]
   (let [type (cond (= type :full) "full-import"
@@ -757,11 +773,11 @@
         params (doto (ModifiableSolrParams.)
                  (.set "qt" (make-param "/dataimport"))
                  (.set "command" (make-param type)))]
-    (.query *connection* params)))
+    (.query ^SolrClient *connection* params)))
 
 (defmacro with-connection [conn & body]
   `(binding [*connection* ~conn]
      (try
        (do ~@body)
-       (finally (.close *connection*)))))
+       (finally (.close ^SolrClient *connection*)))))
 
