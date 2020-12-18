@@ -62,6 +62,15 @@
     (System/setProperty "solr.solr.home" home-dir)
     (System/setProperty "solr.dist.dir" (str (System/getProperty "user.dir")
                                            "/test-files/dist"))
+    (let [[_ major minor :as version] (re-matches #"(\d+)\.(\d+)\..*" (get-solr-version))
+          major (Integer/parseInt major)
+          minor (Integer/parseInt minor)]
+      (println (format "This is solr version %s" (first version)))
+      (when (and (= major 7) (>= minor 4))
+        ;; https://issues.apache.org/jira/browse/SOLR-12858
+        (println "Using get as default method due to issue SOLR-12858")
+        (set-default-method! :get)
+      ))
     (let [cont (make-solr-container)]
       (.load cont)
       (binding [*connection* (EmbeddedSolrServer. cont "clojure-solr")]
@@ -315,8 +324,8 @@
                                        :facet-fields [{:name "type" :ex "type"}]))))
 
 (deftest test-make-security-json-data
-  (let [data (make-security-json-data [["i2kweb" nil "query"] ["i2kconduit-db" nil "upload"]]
-                                      [{:name "read" :role "*"} {:name "schema-read" :role "*"} {:name "update" :role "upload"}])]
+  (let [data (make-security-data [["i2kweb" nil "query"] ["i2kconduit-db" nil "upload"]]
+                                 [{:name "read" :role "*"} {:name "schema-read" :role "*"} {:name "update" :role "upload"}])]
     (is (:credentials data))
     (is (:authorization data))
     (is (:authentication data))

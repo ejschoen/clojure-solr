@@ -25,7 +25,7 @@
 (defonce ^:private url-details (atom {}))
 (defonce ^{:private true :tag BasicCredentialsProvider}  credentials-provider (BasicCredentialsProvider.))
 
-(declare ^{:dynamic true :tag HttpSolrClient} *connection*)
+(declare ^{:dynamic true :tag SolrClient} *connection*)
 
 (def ^:dynamic *trace-fn* nil)
 
@@ -464,6 +464,7 @@
                                (instance? SolrQuery q) q
                                :else (throw (Exception. "q parameter must be a string or SolrQuery")))
         method (parse-method method)
+        _ (trace (format "method: %s default-method: %s" method @default-method))
         facet-result-formatters (into {} (map #(if (map? %)
                                                  [(:name %) (:result-formatter % identity)]
                                                  [% identity])
@@ -583,7 +584,8 @@
     (trace "Executing query")
     (let [^QueryResponse query-results (.query ^SolrClient *connection*
                                                ^SolrQuery query
-                                               ^SolrRequest$METHOD method)
+                                               ^SolrRequest$METHOD method
+                                               )
           ^SolrDocumentList results (.getResults query-results)
           expanded-results (when expand (.getExpandedResults query-results))]
       (trace "Query complete")

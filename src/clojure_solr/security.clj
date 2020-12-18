@@ -101,8 +101,8 @@
     {:credentials credentials
      :authorization {:permissions roles-and-permissions
                      :user-role (into {}
-                                      (for [[permission _ role] names-passwords-and-roles]
-                                        [permission role]))
+                                      (for [[name _ role] names-passwords-and-roles]
+                                        [name role]))
                      :class "solr.RuleBasedAuthorizationPlugin"}
      :authentication {:class "solr.BasicAuthPlugin"
                       :blockUnknown true
@@ -142,7 +142,7 @@
             (throw (ex-info "Solr request failure"
                             {:status (.getStatusCode (.getStatusLine response))
                              :content-type content-type
-                             :body (if (#{"text/plain" "text/html"} content-type-basic)
+                             :body (if (#{"text/plain" "text/html" "application/json"} content-type-basic)
                                      (EntityUtils/toString entity)
                                      (EntityUtils/toByteArray entity))})))
           true)))))
