@@ -349,3 +349,18 @@
                         StandardCharsets/UTF_8)
              (Base64/decodeBase64
               (get-in data [:credentials "i2kweb" :salt]))))))))
+
+(deftest test-delete-doc-by-id
+  (add-document! sample-doc)
+  (commit!)
+  (let [update-response (delete-id! "1")
+        status (.getStatus update-response)]
+    (is (= status 0))))
+
+(deftest test-delete-doc-by-query
+  (add-document! sample-doc)
+  (commit!)
+  (let [update-response (delete-query! "title:\"my title\"")
+        status (.getStatus update-response)
+        ]
+    (is (= status 0))))
