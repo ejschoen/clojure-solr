@@ -6,6 +6,7 @@
   (:import (org.apache.solr.core CoreContainer))
   (:require [clj-time.core :as t])
   (:require [clj-time.coerce :as tcoerce])
+  (:require [cheshire.core :as cheshire])
   (:use [clojure.test])
   (:use [clojure-solr])
   (:use [clojure-solr.security])
@@ -83,6 +84,15 @@
   {:id "1" :type "pdf" :title "my title" :fulltext "my fulltext" :numeric 10
    :updated (tcoerce/to-date (t/date-time 2015 02 27))
    :terms ["Vocabulary 1/Term A" "Vocabulary 1/Term B" "Vocabulary 2/Term X/Term Y"]})
+
+(deftest test-add-doc-with-lazyseq
+  (add-document! {:id 2 :type "pdf" :related_s_mv (cheshire/parse-string "[\"abc\",\"def\"]")})
+  (commit!)
+  (let [result (first (search "*" :facet-filters [{:name "id" :value "2"}]))]
+    (is result)
+    (is (vector? (:related_s_mv result)))
+    (is (= #{"abc" "def"} (set (:related_s_mv result)))))
+  )
 
 (deftest test-add-document!
   (do (add-document! sample-doc)
