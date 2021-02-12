@@ -364,3 +364,60 @@
         status (.getStatus update-response)
         ]
     (is (= status 0))))
+
+(deftest test-query-boolean-filter
+  (add-document! {:id 1 :boolean_b true :type "pdf"})
+  (commit!)
+  (is (= (count (search "*:*" :defType "edismax" :qf "title fulltext")) 1))
+  (is (= 1 (some #(and (= (:value %) "true")
+                       (:count %))
+                 (:values
+                  (first
+                   (:facet-fields
+                    (meta
+                     (search "*:*" :defType "edismax" :qf "title fulltext" :facet-fields ["boolean_b"]))))))))
+  (is (= (count (search "*:*"
+                        :facet-filters [{:name "boolean_b"
+                                               :value "true"
+                                               :formatter format-standard-filter-query}]
+                        :qf "title fulltext"
+                        :defType "edismax"))
+         1))
+  (is (= (count (search "*:*" :facet-filters [{:name "boolean_b"
+                                               :value "true"
+                                               :formatter format-raw-query}]
+                        :qf "title fulltext"
+                        ))
+         1))  
+  (is (= (count (search "*:*" :facet-filters [{:name "boolean_b"
+                                               :value "true"
+                                               :formatter format-raw-query}]
+                        :qf "title fulltext"
+                        :defType "edismax"))
+         1))
+  (is (= (count (search "*:*" :facet-filters [{:name "boolean_b"
+                                               :value "TRUE"
+                                               :formatter format-raw-query}]
+                        :qf "title fulltext"
+                        :defType "edismax"))
+         1))
+  (clojure.pprint/pprint (meta (search "*:*" :facet-filters [{:name "boolean_b"
+                                                              :value "TRUE"
+                                                              :formatter format-raw-query}]
+                                       :debugQuery true
+                                       :qf "title fulltext"
+                                       :defType "edismax")))
+  (clojure.pprint/pprint (meta (search "*:*" :facet-filters [{:name "boolean_b"
+                                                              :value true
+                                                              :formatter format-raw-query}]
+                                       :debugQuery true
+                                       :qf "title fulltext"
+                                       :defType "edismax")))
+  (clojure.pprint/pprint (meta (search "*:*" :facet-filters [{:name "boolean_b"
+                                                              :value true
+                                                              :formatter format-standard-filter-query}]
+                                       :debugQuery true
+                                       :qf "title fulltext"
+                                       :defType "edismax"))))
+
+  
