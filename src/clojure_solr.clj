@@ -53,6 +53,12 @@
   (when *trace-fn*
     (*trace-fn* str)))
 
+(defmacro trace
+  [str-expr]
+  `(when *trace-fn*
+     (let [str# ~str-expr]
+       (*trace-fn* str#))))
+
 (defmacro with-trace
   [fn & body]
   `(binding [*trace-fn* ~fn]

@@ -1,4 +1,4 @@
-(defproject cc.artifice/clojure-solr "3.1.0"
+(defproject cc.artifice/clojure-solr "3.2.0"
   :dependencies [;;[org.clojure/clojure "1.8.0"]
                  ;;[org.apache.solr/solr-solrj "6.6.6"]
                  ;;[org.apache.solr/solr-core "6.6.6" :exclusions [commons-fileupload joda-time]]
@@ -30,7 +30,13 @@
                     [:reportSet
                      [:reports
                       [:report "aggregate"]]]]]]]
-  :profiles {:test {:dependencies [[cheshire "5.9.0"]]}
+  :profiles {:dev {:dependencies [[clj-http "3.10.1" :exclusions [org.clojure/tools.reader
+                                                                  org.apache.httpcomponents/httpmime
+                                                                  org.apache.httpcomponents/httpcore
+                                                                  org.apache.httpcomponents/httpclient]
+                                   ]
+                                  [cheshire "5.9.0"]]}
+             :test {:dependencies [[cheshire "5.9.0"]]}
              :1.8 {:dependencies [[org.clojure/clojure "1.8.0"]]}
              :1.9 {:dependencies [[org.clojure/clojure "1.9.0"]]}
              :1.10 {:dependencies [[org.clojure/clojure "1.10.1"]]}

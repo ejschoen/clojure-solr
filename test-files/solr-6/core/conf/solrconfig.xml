@@ -25,7 +25,7 @@
     that you fully re-index after changing this setting as it can affect both how text is indexed
     and queried.
   -->
-  <luceneMatchVersion>LUCENE_42</luceneMatchVersion>
+  <luceneMatchVersion>6.4.1</luceneMatchVersion>
 
   <jmx />
 
@@ -269,14 +269,15 @@
   -->
   <requestHandler name="standard" class="solr.StandardRequestHandler" default="true">
     <!-- default values for query parameters -->
-     <lst name="defaults">
-       <str name="echoParams">explicit</str>
-       <!-- 
-       <int name="rows">10</int>
-       <str name="fl">*</str>
-       <str name="version">2.1</str>
-        -->
-     </lst>
+    <lst name="defaults">
+      <str name="echoParams">explicit</str>
+      <str name="defType">edismax</str>
+      <!-- 
+           <int name="rows">10</int>
+           <str name="fl">*</str>
+           <str name="version">2.1</str>
+      -->
+    </lst>
   </requestHandler>
 
   <!-- SpellCheckerRequestHandler takes in a word (or several words) as the
