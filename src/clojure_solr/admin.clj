@@ -253,6 +253,10 @@
     response))
 
 
+(defn list-collections
+  []
+  (CollectionAdminRequest/listCollections  solr/*connection*))
+  
 (defn create-collection
   "Create a collection."
   [name num-replicas num-shards & {:keys [config-name #_with-collection

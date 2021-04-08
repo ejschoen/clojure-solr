@@ -334,7 +334,8 @@
                                        :facet-fields [{:name "type" :ex "type"}]))))
 
 (deftest test-make-security-json-data
-  (let [data (make-security-data [["i2kweb" nil "query"] ["i2kconduit-db" nil "upload"]]
+  (let [data (make-security-data [{:user "i2kweb" :password nil :role "query"}
+                                  {:user "i2kconduit-db" :role "upload"}]
                                  [{:name "read" :role "*"} {:name "schema-read" :role "*"} {:name "update" :role "upload"}])]
     (is (:credentials data))
     (is (:authorization data))

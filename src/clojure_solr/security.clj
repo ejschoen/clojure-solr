@@ -79,36 +79,37 @@
    "all"])
             
 (defn make-security-data
-  "names-passwords-and-roles is a vector of triplets containing
-   name, password parameter (can be nil, a length, a string, or a byte array)
-   and a role for each identity.
-   roles-and-permissions is a vector of [permission role] entries, per the
+  "users-passwords-and-roles is a vector of maps containing
+   user, password, and role entries, where password can be nil, a length, a string, or a byte array).
+
+   roles-and-permissions is a map of authorizations entries, per the
    Solr RuleBasedAuthorizationPlugin permissions field.
+
    Returns a map with 3 keys: :credentials, :authorization, and :authentication.
    :authorization and :authentication can be passed directly into security.json.
    to configure Basic Authentication.  :credentials contains entries for each
-   identity in names-passwords-and-roles.  :cleartext-password, :hashed-password,
+   identity in users-passwords-and-roles.  :cleartext-password, :hashed-password,
    and :salt.  The cleartext passwords need to be saved somewhere to be used with
    basic authentication as provided by clojure-solr/set-credentials.
    (spit \"$SOLR_HOME/security.json\" 
          (cheshire.core/generate-string
               (dissoc (make-security-data ... ...)
                       :credentials)))"
-  [names-passwords-and-roles roles-and-permissions]
+  [users-passwords-and-roles roles-and-permissions]
   (let [credentials (into {}
-                          (for [[name password _] names-passwords-and-roles]
-                            [name (hash-password password)]))]
+                          (for [{:keys [user password]} users-passwords-and-roles]
+                            [user (hash-password password)]))]
     {:credentials credentials
      :authorization {:permissions roles-and-permissions
                      :user-role (into {}
-                                      (for [[name _ role] names-passwords-and-roles]
-                                        [name role]))
+                                      (for [{:keys [user role]} users-passwords-and-roles]
+                                        [user role]))
                      :class "solr.RuleBasedAuthorizationPlugin"}
      :authentication {:class "solr.BasicAuthPlugin"
                       :blockUnknown true
                       :credentials (into {}
-                                         (for [[name creds] credentials]
-                                           [name (str (:hashed-password creds) " " (:salt creds))]))}}))
+                                         (for [[user creds] credentials]
+                                           [user (str (:hashed-password creds) " " (:salt creds))]))}}))
 
 ;; Note that we don't support clojure maps.  Need to add an implementation of ToBytesPayload
 ;; for clojure.lang.PersistentArrayMap and/or clojure.lang.SortedArrayMap.
