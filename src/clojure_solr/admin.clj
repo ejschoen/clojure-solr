@@ -293,10 +293,10 @@
   (let [client (SolrZkClient.  zkhost timeout)]
     (.setData client path bytes true)))
 
-(defn upload-to-zookeeper
-  [zkhost path bytes & {:keys [timeout] :or {timeout 60}}]
+(defn download-from-zookeeper
+  [zkhost path & {:keys [timeout] :or {timeout 60}}]
   (with-open [client (SolrZkClient.  zkhost timeout)]
-    (.setData client path bytes true)))
+    (.getData client path nil nil true)))
 
 (defn delete-from-zookeeper
   [zkhost path version & {:keys [timeout] :or {timeout 60}}]
