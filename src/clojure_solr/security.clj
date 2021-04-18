@@ -100,7 +100,10 @@
                           (for [{:keys [user password]} users-passwords-and-roles]
                             [user (hash-password password)]))]
     {:credentials credentials
-     :authorization {:permissions roles-and-permissions
+     :authorization {:permissions (for [{:keys [collection] :as r-and-p} roles-and-permissions]
+                                    (if (= collection "")
+                                      (assoc r-and-p :collection nil)
+                                      r-and-p))
                      :user-role (into {}
                                       (for [{:keys [user role]} users-passwords-and-roles]
                                         [user role]))
