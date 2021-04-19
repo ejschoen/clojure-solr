@@ -336,10 +336,22 @@
 (deftest test-make-security-json-data
   (let [data (make-security-data [{:user "i2kweb" :password nil :role "query"}
                                   {:user "i2kconduit-db" :role "upload"}]
-                                 [{:name "read" :role "*"} {:name "schema-read" :role "*"} {:name "update" :role "upload"}])]
+                                 [{:name "read" :role "*"}
+                                  {:name "schema-read" :role "*"}
+                                  {:name "update" :role "upload"}
+                                  {:name "health" :role "health"
+                                   :path "/admin/info/system"
+                                   :methods ["GET"]
+                                   :collection ""}])]
     (is (:credentials data))
     (is (:authorization data))
     (is (:authentication data))
+    (is (= (last (get-in data [:authorization :permissions]))
+           {:role "health"
+            :name "health"
+            :methods ["GET"]
+            :path "/admin/info/system"
+            :collection nil}))
     (is (get-in data [:credentials "i2kweb" :hashed-password]))
     (is (get-in data [:credentials "i2kweb" :salt]))
     (is (get-in data [:credentials "i2kweb" :cleartext-password]))

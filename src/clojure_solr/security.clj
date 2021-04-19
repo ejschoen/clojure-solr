@@ -97,8 +97,12 @@
                       :credentials)))"
   [users-passwords-and-roles roles-and-permissions]
   (let [credentials (into {}
-                          (for [{:keys [user password]} users-passwords-and-roles]
-                            [user (hash-password password)]))]
+                          (for [{:keys [user password]} users-passwords-and-roles
+                                password-data (hash-password password)]
+                            [user (assoc password-data
+                                         :basic-auth (Base64/encodeBase64String
+                                                      (.getBytes
+                                                       (str user ":" (:cleartext-password password-data)))))]))]
     {:credentials credentials
      :authorization {:permissions (for [{:keys [collection] :as r-and-p} roles-and-permissions]
                                     (if (= collection "")
