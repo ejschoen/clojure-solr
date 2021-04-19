@@ -28,14 +28,21 @@
 
 (defmulti hash-password (fn [password] (type password)))
 
+(def ^:private max-length 32)
+(def ^:private default-length 16)
+
 (defmethod hash-password nil [password]
-  (hash-password 16))
+  (hash-password default-length))
 
 (defmethod hash-password Long [len]
-  (hash-password (random-str len)))
+  (if (<= len max-length)
+    (hash-password (random-str len))
+    (hash-password (str len))))
 
 (defmethod hash-password Integer [len]
-  (hash-password (random-str len)))
+  (if (<= len max-length)
+    (hash-password (random-str len))
+    (hash-password (str len))))
 
 (defmethod hash-password String [password]
   (assoc (hash-password (.getBytes password StandardCharsets/UTF_8))

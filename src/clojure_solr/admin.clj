@@ -33,6 +33,7 @@
            [org.apache.http.client.methods HttpPost HttpGet]
            [org.apache.http.entity InputStreamEntity ContentType]
            [org.apache.http HttpRequest]
+           [org.apache.http.util EntityUtils]
            )
   (:import [java.util.zip ZipInputStream ZipEntry ZipOutputStream]
            [java.io File InputStream ByteArrayInputStream ByteArrayOutputStream]
@@ -171,13 +172,16 @@
 (defmethod upload-config-set InputStream
   [name zipstream]
   (let [base-url (.getBaseURL solr/*connection*)
+        _ (println "**** Base URL:" base-url)
         base-client (.getHttpClient (solr/connect base-url))
         upload-url (str base-url "/admin/configs?action=UPLOAD&name=" name)]
-    (let [response (http/post upload-url
-                              {:body zipstream
-                               :headers {"Content-Type" "application/octet-stream"}})
-          status (:status response)
-          body (:body response)]
+    (let [entity (doto (InputStreamEntity. zipstream -1)
+                   (.setContentType "binary/octet-stream"))
+          post (doto (HttpPost. upload-url)
+                 (.setEntity entity))
+          response (.execute base-client post)
+          status (.getStatusCode (.getStatusLine response))
+          body (EntityUtils/toString (.getEntity response))]
       (solr/trace (format "upload-config-set status %d reason %s" status body))
       (if (>= status 400)
         (throw (ex-info body {:response response :status status}))
