@@ -240,7 +240,10 @@
         (throw (ex-info "Request failed"
                         {"errors" (.getAll (.getErrorMessages response))}))))))
         
-    
+(def ^:private router-names
+  {"implicit" :implicit
+   "compositeId" :composite-id})
+
 (defn get-cluster-status
   "Get status of a cluster"
   [& {:keys [collection-name route-key shard-name]}]
@@ -252,7 +255,7 @@
     {:collections (into {}
                         (for [[name collection] collections]
                           [name {:config-name (.get collection "configName")
-                                 :router-name (.get (.get collection "router") "name")
+                                 :router-name (get router-names (.get (.get collection "router") "name"))
                                  ;; :router-field
                                  :shards (count (.get collection "shards"))
                                  :max-shards-per-node (Integer/parseInt (.get collection "maxShardsPerNode"))
@@ -290,13 +293,14 @@
                                           timeout]
                                    :or {timeout 60}}]
   {:pre [name num-replicas num-shards
-         (#{:implicit :composite-id nil} router-name)]}
+         (#{:implicit :composite-id "compositeId" "implicit" nil} router-name)]}
   (let [create-request (if (not-empty config-name)
                          (CollectionAdminRequest/createCollection name config-name num-shards num-replicas)
                          (CollectionAdminRequest/createCollection name num-shards num-replicas))]
     (doto create-request
-      (cond-> (= :router-name :implicit) (.setRouterName "implicit"))
-      (cond-> (= :router-name :composite-id) (.setRouterName "compositedId"))
+      (cond-> (= router-name :implicit) (.setRouterName "implicit"))
+      (cond-> (= router-name :composite-id) (.setRouterName "compositedId"))
+      (cond-> (not-empty router-name) (.setRouterName router-name))
       (cond-> (not-empty router-field) (.setRouterField router-field))
       (cond-> (not-empty shards) (.setShards shards))
       (cond-> replication-factor (.setReplicationFactor replication-factor))
