@@ -257,7 +257,9 @@
                           [name {:config-name (.get collection "configName")
                                  :router-name (get router-names (.get (.get collection "router") "name"))
                                  ;; :router-field
-                                 :shards (count (.get collection "shards"))
+                                 :num-shards (count (.get collection "shards"))
+                                 :num-replicas (apply max (map (fn [shard] (count (.get shard "replicas"))) (.get collection "shards")))
+                                 :shards (str/join "," (keys (.get collection "shards")))
                                  :max-shards-per-node (Integer/parseInt (.get collection "maxShardsPerNode"))
                                  :replication-factor (Integer/parseInt (.get collection "replicationFactor"))
                                  :nrt-replicas (Integer/parseInt (.get collection "nrtReplicas"))
@@ -266,7 +268,7 @@
                                  :node-set (str/join #","
                                                      (distinct
                                                       (for [[shard shard-desc] (.get collection "shards")
-                                                           [replica replica-desc] (.get shard-desc "replicas")]
+                                                            [replica replica-desc] (.get shard-desc "replicas")]
                                                        (.get replica-desc "node_name"))))
                                  :auto-add-replicas? (Boolean/parseBoolean (.get collection "autoAddReplicas"))}]))
      :live-nodes live-nodes})
