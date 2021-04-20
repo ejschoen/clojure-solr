@@ -128,7 +128,7 @@
                           (let [target-host (.getAttribute context HttpCoreContext/HTTP_TARGET_HOST)
                                 auth-scope (make-auth-scope (.getHostName target-host) (.getPort target-host))
                                 creds (.getCredentials credentials-provider auth-scope)]
-                            (println "**** CLOJURE-SOLR: HttpRequestInterceptor here.  Looking for" auth-scope "creds:" creds)
+                            ;;(println "**** CLOJURE-SOLR: HttpRequestInterceptor here.  Looking for" auth-scope "creds:" creds)
                             (when creds
                               (.update auth-state (BasicScheme.) creds)))))))))
         client ^CloseableHttpClient (.build builder)

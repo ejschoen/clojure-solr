@@ -247,8 +247,26 @@
   (let [request (CollectionAdminRequest$ClusterStatus.)
         response (.request solr/*connection* request)
         cluster (.get response "cluster")
-        live-nodes (.get cluster "live_nodes")]
-    live-nodes)
+        live-nodes (.get cluster "live_nodes")
+        collections (.get cluster "collections")]
+    {:collections (into {}
+                        (for [[name collection] collections]
+                          [name {:config-name (.get collection "configName")
+                                 :router-name (.get (.get collection "router") "name")
+                                 ;; :router-field
+                                 :shards (count (.get collection "shards"))
+                                 :max-shards-per-node (Integer/parseInt (.get collection "maxShardsPerNode"))
+                                 :replication-factor (Integer/parseInt (.get collection "replicationFactor"))
+                                 :nrt-replicas (Integer/parseInt (.get collection "nrtReplicas"))
+                                 :pull-replicas (Integer/parseInt (.get collection "pullReplicas"))
+                                 :tlog-replicas (Integer/parseInt (.get collection "tlogReplicas"))
+                                 :node-set (str/join #","
+                                                     (distinct
+                                                      (for [[shard shard-desc] (.get collection "shards")
+                                                           [replica replica-desc] (.get shard-desc "replicas")]
+                                                       (.get replica-desc "node_name"))))
+                                 :auto-add-replicas? (Boolean/parseBoolean (.get collection "autoAddReplicas"))}]))
+     :live-nodes live-nodes})
   #_(let [^CollectionAdminRequest$ClusterStatus status-request (doto (CollectionAdminRequest/getClusterStatus)
                                                                (cond-> collection-name (.setCollectionName collection-name))
                                                                (cond-> route-key (.setRouteKey route-key))
