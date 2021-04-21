@@ -258,7 +258,7 @@
                                  :router-name (get router-names (.get (.get collection "router") "name"))
                                  ;; :router-field
                                  :num-shards (count (.get collection "shards"))
-                                 :num-replicas (apply max (map (fn [shard] (count (.get shard "replicas"))) (.get collection "shards")))
+                                 :num-replicas (apply max (map (fn [[_ shard]] (count (.get shard "replicas"))) (.get collection "shards")))
                                  :shards (str/join "," (keys (.get collection "shards")))
                                  :max-shards-per-node (Integer/parseInt (.get collection "maxShardsPerNode"))
                                  :replication-factor (Integer/parseInt (.get collection "replicationFactor"))
