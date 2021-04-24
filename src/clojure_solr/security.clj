@@ -1,5 +1,6 @@
 (ns clojure-solr.security
   (:use [clojure-solr :only [*connection*]])
+  (:require [clojure.pprint :as pprint])
   (:import [java.nio.charset StandardCharsets]
            [java.security MessageDigest NoSuchAlgorithmException SecureRandom]
            [java.util Random]
@@ -105,7 +106,7 @@
   [users-passwords-and-roles roles-and-permissions]
   (let [credentials (into {}
                           (for [{:keys [user password]} users-passwords-and-roles
-                                password-data (hash-password password)]
+                                :let [password-data (hash-password password)]]
                             [user (assoc password-data
                                          :basic-auth (Base64/encodeBase64String
                                                       (.getBytes

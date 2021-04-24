@@ -40,6 +40,11 @@
            [java.nio.file Path Paths Files LinkOption OpenOption])
   )
 
+(def json-enabled?
+  (try (require 'cheshire.core)
+       true
+       (catch Throwable _ false)))
+
 (defn list-cores
   "List loaded cores in a standalone Solr"
   []
@@ -172,7 +177,6 @@
 (defmethod upload-config-set InputStream
   [name zipstream]
   (let [base-url (.getBaseURL solr/*connection*)
-        _ (println "**** Base URL:" base-url)
         base-client (.getHttpClient (solr/connect base-url))
         upload-url (str base-url "/admin/configs?action=UPLOAD&name=" name)]
     (let [entity (doto (InputStreamEntity. zipstream -1)
@@ -284,6 +288,22 @@
   []
   (CollectionAdminRequest/listCollections  solr/*connection*))
   
+(defn modify-collection
+  [name & {:keys [max-shards-per-node
+                  replication-factor
+                  auto-add-replicas?
+                  config-name
+                  timeout]
+           :or {timeout 60}
+           :as properties}]
+  (let [props (merge (if max-shards-per-node {"maxShardsPerNode" max-shards-per-node})
+                     (if replication-factor {"replicationFactor" replication-factor})
+                     (if auto-add-replicas? {"autoAddReplicas" auto-add-replicas?})
+                     (if config-name {"collection.configName" config-name})) 
+        modify-request (CollectionAdminRequest/modifyCollection name props)]
+    (.processAndWait modify-request solr/*connection* timeout)))
+                  
+
 (defn create-collection
   "Create a collection."
   [name num-replicas num-shards & {:keys [config-name #_with-collection
@@ -331,3 +351,22 @@
   (with-open [client (SolrZkClient.  zkhost timeout)]
     (.delete client path version true)))
 
+(defn get-system-info
+  [&{:keys [as] :or {as (if json-enabled? :json :string)}}]
+  (let [base-url (.getBaseURL solr/*connection*)
+        base-client (.getHttpClient (solr/connect base-url))
+        info-url (str base-url "/admin/info/system")]
+    (let [req (HttpGet. info-url)
+          response (.execute base-client req)
+          status (.getStatusCode (.getStatusLine response))
+          body (EntityUtils/toString (.getEntity response))]
+      (if (>= status 400)
+        (throw (ex-info body {:response response :status status}))
+        (case as
+          :string body
+          :json (if json-enabled?
+                  (if-let [parse-string (ns-resolve (symbol "cheshire.core") (symbol "parse-string"))]
+                    (parse-string body true)
+                    (throw (IllegalStateException. "Missing #'cheshire.core/parse-string")))
+                  (throw (IllegalStateException. "cheshire is not loaded.")))
+          body)))))
