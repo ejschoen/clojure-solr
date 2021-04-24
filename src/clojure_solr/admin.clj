@@ -355,7 +355,7 @@
   [&{:keys [as] :or {as (if json-enabled? :json :string)}}]
   (let [base-url (.getBaseURL solr/*connection*)
         base-client (.getHttpClient (solr/connect base-url))
-        info-url (str base-url "/admin/info/system")]
+        info-url (str base-url "/admin/info/system?wt=json")]
     (let [req (HttpGet. info-url)
           response (.execute base-client req)
           status (.getStatusCode (.getStatusLine response))
