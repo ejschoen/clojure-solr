@@ -322,7 +322,7 @@
     (doto create-request
       (cond-> (= router-name :implicit) (.setRouterName "implicit"))
       (cond-> (= router-name :composite-id) (.setRouterName "compositedId"))
-      (cond-> (not-empty router-name) (.setRouterName router-name))
+      (cond-> (and (string? router-name) (not-empty router-name)) (.setRouterName router-name))
       (cond-> (not-empty router-field) (.setRouterField router-field))
       (cond-> (not-empty shards) (.setShards shards))
       (cond-> replication-factor (.setReplicationFactor replication-factor))

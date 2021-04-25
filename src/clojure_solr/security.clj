@@ -106,7 +106,12 @@
   [users-passwords-and-roles roles-and-permissions]
   (let [credentials (into {}
                           (for [{:keys [user password]} users-passwords-and-roles
-                                :let [password-data (hash-password password)]]
+                                :let [password-data (if (and (map? password)
+                                                             (not-empty (:cleartext-password password))
+                                                             (not-empty (:hashed-password password))
+                                                             (not-empty (:salt password)))
+                                                      password
+                                                      (hash-password password))]]
                             [user (assoc password-data
                                          :basic-auth (Base64/encodeBase64String
                                                       (.getBytes
