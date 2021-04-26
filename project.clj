@@ -1,4 +1,4 @@
-(defproject cc.artifice/clojure-solr "3.3.5"
+(defproject cc.artifice/clojure-solr "3.4.0"
   :dependencies [;;[org.clojure/clojure "1.8.0"]
                  ;;[org.apache.solr/solr-solrj "6.6.6"]
                  ;;[org.apache.solr/solr-core "6.6.6" :exclusions [commons-fileupload joda-time]]

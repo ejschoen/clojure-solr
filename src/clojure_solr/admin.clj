@@ -31,7 +31,7 @@
   (:import [org.apache.solr.common.cloud SolrZkClient])
   (:import [org.apache.http.client HttpClient]
            [org.apache.http.client.methods HttpPost HttpGet]
-           [org.apache.http.entity InputStreamEntity ContentType]
+           [org.apache.http.entity InputStreamEntity StringEntity ContentType]
            [org.apache.http HttpRequest]
            [org.apache.http.util EntityUtils]
            )
@@ -351,6 +351,10 @@
   (with-open [client (SolrZkClient.  zkhost timeout)]
     (.delete client path version true)))
 
+(defn get-cheshire-parse-string
+  []
+  (ns-resolve (symbol "cheshire.core") (symbol "parse-string")))
+
 (defn get-system-info
   [&{:keys [as] :or {as (if json-enabled? :json :string)}}]
   (let [base-url (.getBaseURL solr/*connection*)
@@ -365,8 +369,69 @@
         (case as
           :string body
           :json (if json-enabled?
-                  (if-let [parse-string (ns-resolve (symbol "cheshire.core") (symbol "parse-string"))]
+                  (if-let [parse-string (get-cheshire-parse-string)]
                     (parse-string body true)
                     (throw (IllegalStateException. "Missing #'cheshire.core/parse-string")))
                   (throw (IllegalStateException. "cheshire is not loaded.")))
           body)))))
+
+(defmulti upload-blob (fn [name data] (type data)))
+
+(defmethod upload-blob Path [name path]
+  (with-open [s (Files/newInputStream path (make-array OpenOption 0))]
+    (upload-blob name s)))
+
+(defmethod upload-blob String [name path]
+  (upload-blob name (Paths/get path (make-array String 0))))
+
+(defmethod upload-blob InputStream [name data]
+  (let [base-url (.getBaseURL solr/*connection*)
+        base-client (.getHttpClient (solr/connect base-url))
+        upload-url (str base-url "/.system/blob/" name)]
+    (let [entity (doto (InputStreamEntity. data -1)
+                   (.setContentType "binary/octet-stream"))
+          post (doto (HttpPost. upload-url)
+                 (.setEntity entity))
+          response (.execute base-client post)
+          status (.getStatusCode (.getStatusLine response))
+          body (EntityUtils/toString (.getEntity response))]
+      (solr/trace (format "upload-config-set status %d reason %s" status body))
+      (if (>= status 400)
+        (throw (ex-info body {:response response :status status}))
+        true))))
+
+(defn list-blobs [& {:keys [name as] :or {as :string}}]
+  (let [base-url (.getBaseURL solr/*connection*)
+        base-client (.getHttpClient (solr/connect base-url))
+        list-url (if name
+                     (str base-url "/.system/blob/" name "?omitHeader=true")
+                     (str base-url "/.system/blob?omitHeader=true"))
+        get (HttpGet. list-url)
+        response (.execute base-client get)
+        body (EntityUtils/toString (.getEntity response))]
+    (case (.getStatusCode (.getStatusLine response))
+      200 (case as
+            :string body
+            :json (if json-enabled?
+                    (if-let [parse-string (get-cheshire-parse-string)]
+                      (get-in (parse-string body true) [:response :docs])
+                      (throw (IllegalStateException. "Missing #'cheshire.core/parse-string")))
+                    (throw (IllegalStateException. "cheshire is not loaded"))))
+      404 []
+      (throw (ex-info (.getReasonPhrase (.getStatusLine response))
+                      {:reason (.getReasonPhrase (.getStatusLine response))
+                       :status (.getStatusCode (.getStatusLine response))})))))
+
+(defn delete-blob [blob-id]
+  (let [base-url (.getBaseURL solr/*connection*)
+        base-client (.getHttpClient (solr/connect base-url))
+        delete-url (str base-url "/.system/update?commit=true")
+        post (doto (HttpPost. delete-url)
+               (.setEntity (doto (StringEntity. (format "{\"delete\" : {\"id\" : \"%s\" }}" blob-id))
+                             (.setContentType "application/json"))))
+        response (.execute base-client post)]
+    (if (>= (.getStatusCode (.getStatusLine response)) 300)
+      (throw (ex-info "Failed"
+                      {:reason (.getReasonPhrase (.getStatusLine response))
+                       :status (.getStatusCode (.getStatusLine response))}))
+      true)))
