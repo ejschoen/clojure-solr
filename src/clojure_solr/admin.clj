@@ -45,6 +45,11 @@
        true
        (catch Throwable _ false)))
 
+(defn get-cheshire-parse-string
+  []
+  (ns-resolve (symbol "cheshire.core") (symbol "parse-string")))
+
+
 (defn list-cores
   "List loaded cores in a standalone Solr"
   []
@@ -319,21 +324,67 @@
   (let [create-request (if (not-empty config-name)
                          (CollectionAdminRequest/createCollection name config-name num-shards num-replicas)
                          (CollectionAdminRequest/createCollection name num-shards num-replicas))]
-    (doto create-request
-      (cond-> (= router-name :implicit) (.setRouterName "implicit"))
-      (cond-> (= router-name :composite-id) (.setRouterName "compositedId"))
-      (cond-> (and (string? router-name) (not-empty router-name)) (.setRouterName router-name))
-      (cond-> (not-empty router-field) (.setRouterField router-field))
-      (cond-> (not-empty shards) (.setShards shards))
-      (cond-> replication-factor (.setReplicationFactor replication-factor))
-      (cond-> nrt-replicas (.setNrtReplicas nrt-replicas))
-      (cond-> pull-replicas (.setPullReplicas pull-replicas))
-      (cond-> tlog-replicas (.setTlogReplicas tlog-replicas))
-      (cond-> max-shards-per-node (.setMaxShardsPerNode max-shards-per-node))
-      (cond-> node-set (.setCreateNodeSet node-set))
-      (cond-> (not (nil? auto-add-replicas?)) (.setAutoAddReplicas auto-add-replicas?))
-      (cond-> collection-properties (.setProperties (map->Properties collection-properties))))
+    (when (= router-name :implicit)
+      (solr/trace "(.setRouterName \"implicit\")")
+      (.setRouterName create-request "implicit"))
+    (when (= router-name :composite-id)
+      (solr/trace "(.setRouterName \"compositeId\")")
+      (.setRouterName create-request "compositeId"))
+    (when (and (string? router-name) (not-empty router-name))
+      (solr/trace (format "(setRouterName \"%s\")" router-name))
+      (.setRouterName create-request router-name))
+    (when (not-empty router-field)
+      (solr/trace (format "(.setRouterField \"%s\")" router-field))
+      (.setRouterField create-request router-field))
+    (when (not-empty shards)
+      (solr/trace (format "(.setShards \"%s\")" shards))
+      (.setShards create-request shards))
+    (when replication-factor
+      (solr/trace (format "(.setReplicationFactor %d)" replication-factor))
+      (.setReplicationFactor create-request replication-factor))
+    (when (and nrt-replicas (> nrt-replicas 1))
+      (solr/trace (format "(.setNrtReplicas %d)" nrt-replicas))
+      (.setNrtReplicas create-request nrt-replicas))
+    (when (and pull-replicas (> pull-replicas 0))
+      (solr/trace (format "(.setPullReplicas %d)" pull-replicas))
+      (.setPullReplicas create-request pull-replicas))
+    (when (and tlog-replicas (> tlog-replicas 0))
+      (solr/trace (format "(.setTlogReplicas %d)" tlog-replicas))
+      (.setTlogReplicas create-request tlog-replicas))
+    (when (and max-shards-per-node (> max-shards-per-node 1))
+      (solr/trace (format "(.setMaxShardsPerNode %d)" max-shards-per-node))
+      (.setMaxShardsPerNode create-request max-shards-per-node))
+    (when (not-empty node-set)
+      (solr/trace (format "(.setCreateNodeSet \"%s\")" node-set))
+      (.setCreateNodeSet create-request node-set))
+    (when auto-add-replicas?
+      (solr/trace (format "(.setAutoAddReplicas %s)" auto-add-replicas?))
+      (.setAutoAddReplicas create-request auto-add-replicas?))
+    (when collection-properties
+      (.setProperties create-request (map->Properties collection-properties)))
     (.processAndWait create-request solr/*connection* timeout)))
+
+(defn get-collection-overlay
+  [collection & {:keys [as]}]
+  (let [base-url (.getBaseURL solr/*connection*)
+        base-client (.getHttpClient (solr/connect base-url))
+        overlay-url (str base-url "/" collection "/config/overlay")
+        http-get (HttpGet. overlay-url)
+        response (.execute base-client http-get)]
+    (if (>= (.getStatusCode (.getStatusLine response)) 300)
+      (throw (ex-info "Failed"
+                      {:reason (.getReasonPhrase (.getStatusLine response))
+                       :success false
+                       :status (.getStatusCode (.getStatusLine response))}))
+      (let [body (EntityUtils/toString (.getEntity response))]
+        (case as
+            :string body
+            :json (if json-enabled?
+                    (if-let [parse-string (get-cheshire-parse-string)]
+                      (let [overlay (get (parse-string body true) :overlay)]
+                        overlay)
+                      (throw (IllegalStateException. "Missing #'cheshire.core/parse-string")))
+                    (throw (IllegalStateException. "cheshire is not loaded"))))))))
 
 
 (defn upload-to-zookeeper
@@ -350,10 +401,6 @@
   [zkhost path version & {:keys [timeout] :or {timeout 60}}]
   (with-open [client (SolrZkClient.  zkhost timeout)]
     (.delete client path version true)))
-
-(defn get-cheshire-parse-string
-  []
-  (ns-resolve (symbol "cheshire.core") (symbol "parse-string")))
 
 (defn get-system-info
   [&{:keys [as] :or {as (if json-enabled? :json :string)}}]
@@ -395,7 +442,7 @@
           response (.execute base-client post)
           status (.getStatusCode (.getStatusLine response))
           body (EntityUtils/toString (.getEntity response))]
-      (solr/trace (format "upload-config-set status %d reason %s" status body))
+      (solr/trace (format "upload-blob status %d reason %s" status body))
       (if (>= status 400)
         (throw (ex-info body {:response response :status status}))
         true))))
@@ -414,7 +461,7 @@
             :string body
             :json (if json-enabled?
                     (if-let [parse-string (get-cheshire-parse-string)]
-                      (get-in (parse-string body true) [:response :docs])
+                      (filter #(:blobName %) (get-in (parse-string body true) [:response :docs]))
                       (throw (IllegalStateException. "Missing #'cheshire.core/parse-string")))
                     (throw (IllegalStateException. "cheshire is not loaded"))))
       404 []
@@ -422,16 +469,58 @@
                       {:reason (.getReasonPhrase (.getStatusLine response))
                        :status (.getStatusCode (.getStatusLine response))})))))
 
-(defn delete-blob [blob-id]
-  (let [base-url (.getBaseURL solr/*connection*)
-        base-client (.getHttpClient (solr/connect base-url))
-        delete-url (str base-url "/.system/update?commit=true")
-        post (doto (HttpPost. delete-url)
-               (.setEntity (doto (StringEntity. (format "{\"delete\" : {\"id\" : \"%s\" }}" blob-id))
-                             (.setContentType "application/json"))))
-        response (.execute base-client post)]
+(defn- string-post
+  [client url body content-type]
+  (let [post (doto (HttpPost. url)
+               (.setEntity (doto (StringEntity. body)
+                             (.setContentType content-type))))
+        response (.execute client post)]
     (if (>= (.getStatusCode (.getStatusLine response)) 300)
       (throw (ex-info "Failed"
                       {:reason (.getReasonPhrase (.getStatusLine response))
+                       :success false
                        :status (.getStatusCode (.getStatusLine response))}))
-      true)))
+      {:success true
+       :response response})))
+
+(defn delete-blob [blob-id]
+  (let [base-url (.getBaseURL solr/*connection*)
+        base-client (.getHttpClient (solr/connect base-url))
+        delete-url (str base-url "/.system/update?commit=true")]
+    (string-post base-client delete-url
+                 (format "{\"delete\" : {\"id\" : \"%s\" }}" blob-id)
+                 "application/json")
+    true))
+
+(defn add-runtime-lib
+  [collection blob-name version]
+  (let [base-url (.getBaseURL solr/*connection*)
+        base-client (.getHttpClient (solr/connect base-url))
+        collection-url (str base-url (format "/%s/config" collection))]
+    (string-post base-client collection-url
+                 (format "{\"add-runtimelib\": {\"name\": \"%s\", \"version\": %s}}"
+                         blob-name version)
+                 "application/json")
+    true))
+
+(defn update-runtime-lib
+  [collection blob-name version]
+  (let [base-url (.getBaseURL solr/*connection*)
+        base-client (.getHttpClient (solr/connect base-url))
+        collection-url (str base-url (format "/%s/config" collection))]
+    (string-post base-client collection-url
+                 (format "{\"update-runtimelib\": {\"name\": \"%s\", \"version\": %s}}"
+                         blob-name version)
+                 "application/json")
+    true))
+
+(defn delete-runtime-lib
+  [collection blob-name]
+  (let [base-url (.getBaseURL solr/*connection*)
+        base-client (.getHttpClient (solr/connect base-url))
+        collection-url (str base-url (format "/%s/config" collection))]
+    (string-post base-client collection-url
+                 (format "{\"delete-runtimelib\": \"%s\"}" blob-name)
+                 "application/json")
+    true))
+
