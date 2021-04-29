@@ -390,6 +390,7 @@
 (defn upload-to-zookeeper
   [zkhost path bytes & {:keys [timeout] :or {timeout 60}}]
   (let [client (SolrZkClient.  zkhost timeout)]
+    (.makePath client path false true)
     (.setData client path bytes true)))
 
 (defn download-from-zookeeper
