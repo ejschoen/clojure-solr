@@ -130,7 +130,9 @@
   (do (add-document! sample-doc)
       (commit!))
   (is (= [{:name "terms" :value "Vocabulary 1" :count 1}]
-         (:facet-queries (meta (search "my" :facet-queries [{:name "terms" :value "Vocabulary 1"}] :df "fulltext"))))))
+         (:facet-queries (meta (search "my" :facet-queries [{:name "terms" :value "Vocabulary 1"}] :df "fulltext")))))
+  (is (= "q=my&df=fulltext&facet-queries={:name+\"terms\",+:value+\"Vocabulary+1\"}&facet.query={!raw+f%3Dterms}Vocabulary+1&facet=true&facet.mincount=1"
+         (search "my" :just-return-query? true :facet-queries [{:name "terms" :value "Vocabulary 1"}] :df "fulltext"))))
 
 (deftest test-facet-prefix
   (do (add-document! sample-doc)

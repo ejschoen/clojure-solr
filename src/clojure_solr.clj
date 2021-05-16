@@ -458,15 +458,17 @@
      :collapse              field name or map with CollapsingQParser parameters.
      :expand                true or map with {:rows ... :q ... :fq ... :sort ... }
                             for the ExpandComponent.
+     :just-return-query?    Just return the query that would be run on Solr
   Additional keys can be passed, using Solr parameter names as keywords.
   Returns the query results as the value of the call, with faceting results as metadata.
   Use (meta result) to get facet data."
   [q {:keys [method fields facet-fields facet-date-ranges facet-numeric-ranges facet-queries
              facet-mincount facet-hier-sep facet-filters facet-pivot-fields cursor-mark
-             collapse expand] :as flags}]
+             collapse expand just-return-query?] :as flags}]
   (when *trace-fn*
     (show-query q flags))
-  (let [^SolrQuery query (cond (string? q) (SolrQuery. q)
+  (let [flags (dissoc flags :just-return-query?)
+        ^SolrQuery query (cond (string? q) (SolrQuery. q)
                                (instance? SolrQuery q) q
                                :else (throw (Exception. "q parameter must be a string or SolrQuery")))
         method (parse-method method)
@@ -588,55 +590,57 @@
               (.setParam query (format "expand.%s" (name key)) (into-array String [(str val)])))
             :else (throw (Exception. "expand parameter must be true or a map"))))
     (trace "Executing query")
-    (let [^QueryResponse query-results (.query ^SolrClient *connection*
-                                               ^SolrQuery query
-                                               ^SolrRequest$METHOD method
-                                               )
-          ^SolrDocumentList results (.getResults query-results)
-          expanded-results (when expand (.getExpandedResults query-results))]
-      (trace "Query complete")
-      (trace query-results)
-      (when (:debugQuery flags)
-        (trace (.getDebugMap query-results)))
-      (with-meta
-        (if expand
-          (into {}
-                (for [[key docs] expanded-results]
-                  [key (map doc-to-hash docs)]))
-          (map doc-to-hash results))
-        (merge
-         (when cursor-mark
-           (let [next  (.getNextCursorMark query-results)]
-             {:next-cursor-mark next
-              :cursor-done (.equals next (if (= cursor-mark true)
-                                           (CursorMarkParams/CURSOR_MARK_START)
-                                           cursor-mark))}))
-         (when (:debugQuery flags)
-           {:debug (.getDebugMap query-results)})
-         (when (.getFieldStatsInfo query-results)
-           {:statistics
+    (if just-return-query?
+      (str query)
+      (let [^QueryResponse query-results (.query ^SolrClient *connection*
+                                                 ^SolrQuery query
+                                                 ^SolrRequest$METHOD method
+                                                 )
+            ^SolrDocumentList results (.getResults query-results)
+            expanded-results (when expand (.getExpandedResults query-results))]
+        (trace "Query complete")
+        (trace query-results)
+        (when (:debugQuery flags)
+          (trace (.getDebugMap query-results)))
+        (with-meta
+          (if expand
             (into {}
-                  (for [[field info] (.getFieldStatsInfo query-results)]
-                    [field {:min (.getMin info)
-                            :max (.getMax info)
-                            :mean (.getMean info)
-                            :stddev (.getStddev info)
-                            :sum (.getSum info)
-                            :count (.getCount info)
-                            :missing (.getMissing info)
-                            }]))})
-         {:start (when results (.getStart results))
-          :rows-set (count results)
-          :rows-total (when results (.getNumFound results))
-          :highlighting (.getHighlighting query-results)
-          :facet-fields (extract-facets query-results facet-hier-sep false facet-result-formatters facet-key-fields)
-          :facet-range-fields (extract-facet-ranges query-results facet-date-ranges)
-          :limiting-facet-fields (extract-facets query-results facet-hier-sep true facet-result-formatters facet-key-fields)
-          :facet-queries (extract-facet-queries facet-queries (.getFacetQuery query-results))
-          :facet-pivot-fields (extract-pivots query-results facet-date-ranges)
-          :results-obj results
-          :query query
-          :query-results-obj query-results})))))
+                  (for [[key docs] expanded-results]
+                    [key (map doc-to-hash docs)]))
+            (map doc-to-hash results))
+          (merge
+            (when cursor-mark
+              (let [next  (.getNextCursorMark query-results)]
+                {:next-cursor-mark next
+                 :cursor-done (.equals next (if (= cursor-mark true)
+                                              (CursorMarkParams/CURSOR_MARK_START)
+                                              cursor-mark))}))
+            (when (:debugQuery flags)
+              {:debug (.getDebugMap query-results)})
+            (when (.getFieldStatsInfo query-results)
+              {:statistics
+               (into {}
+                     (for [[field info] (.getFieldStatsInfo query-results)]
+                       [field {:min (.getMin info)
+                               :max (.getMax info)
+                               :mean (.getMean info)
+                               :stddev (.getStddev info)
+                               :sum (.getSum info)
+                               :count (.getCount info)
+                               :missing (.getMissing info)
+                               }]))})
+            {:start (when results (.getStart results))
+             :rows-set (count results)
+             :rows-total (when results (.getNumFound results))
+             :highlighting (.getHighlighting query-results)
+             :facet-fields (extract-facets query-results facet-hier-sep false facet-result-formatters facet-key-fields)
+             :facet-range-fields (extract-facet-ranges query-results facet-date-ranges)
+             :limiting-facet-fields (extract-facets query-results facet-hier-sep true facet-result-formatters facet-key-fields)
+             :facet-queries (extract-facet-queries facet-queries (.getFacetQuery query-results))
+             :facet-pivot-fields (extract-pivots query-results facet-date-ranges)
+             :results-obj results
+             :query query
+             :query-results-obj query-results}))))))
   
 (defn search
   "Query solr through solrj.
@@ -674,10 +678,11 @@
                             use comma separated lists: this-facet,other-facet.
      :cursor-mark           true -- initial cursor; else a previous cursor value from 
                             (:next-cursor-mark (meta result))
+     :just-return-query?    Just return the query that would be run on Solr
   Returns the query results as the value of the call, with faceting results as metadata.
   Use (meta result) to get facet data."
   [q & {:keys [method fields facet-fields facet-date-ranges facet-numeric-ranges facet-queries
-               facet-mincount facet-hier-sep facet-filters facet-pivot-fields] :as flags}]
+               facet-mincount facet-hier-sep facet-filters facet-pivot-fields just-return-query?] :as flags}]
   (search* q flags))
 
 (defn atomically-update!
