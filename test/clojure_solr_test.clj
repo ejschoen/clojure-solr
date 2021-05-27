@@ -97,7 +97,7 @@
 (deftest test-add-document!
   (do (add-document! sample-doc)
       (commit!))
-  (is (= sample-doc (dissoc (first (search "my" :df "fulltext")) :_version_)))
+  (is (= sample-doc (dissoc (first (search "my" :df "fulltext")) :_version_ :word)))
   (is (= {:start 0 :rows-set 1 :rows-total 1} (select-keys (meta (search "my"  :df "fulltext"))
                                                            [:start :rows-set :rows-total])))
   (is (= [{:name "terms"
@@ -123,7 +123,7 @@
 (deftest test-quoted-search
   (do (add-document! sample-doc)
       (commit!))
-  (is (= sample-doc (dissoc (first (search "\"my fulltext\""  :df "fulltext")) :_version_)))
+  (is (= sample-doc (dissoc (first (search "\"my fulltext\""  :df "fulltext")) :_version_ :word)))
   (is (empty? (search "\"fulltext my\""  :df "fulltext"))))
 
 (deftest test-quoted-search-mw
@@ -133,12 +133,15 @@
   (is (empty? (search*-with-middleware "\"fulltext my\""  {:df "fulltext"}))))
 
 (deftest test-facet-query
-  (do (add-document! sample-doc)
-      (commit!))
-  (is (= [{:name "terms" :value "Vocabulary 1" :count 1}]
-         (:facet-queries (meta (search "my" :facet-queries [{:name "terms" :value "Vocabulary 1"}] :df "fulltext")))))
-  (is (= "q=my&df=fulltext&facet-queries={:name+\"terms\",+:value+\"Vocabulary+1\"}&facet.query={!raw+f%3Dterms}Vocabulary+1&facet=true&facet.mincount=1"
-         (search "my" :just-return-query? true :facet-queries [{:name "terms" :value "Vocabulary 1"}] :df "fulltext"))))
+  (let [query->map (fn [s]
+                     (let [params (str/split s #"&")]
+                       (into {} (map (fn [pair] (str/split pair #"=")) params))))]
+    (do (add-document! sample-doc)
+        (commit!))
+    (is (= [{:name "terms" :value "Vocabulary 1" :count 1}]
+           (:facet-queries (meta (search "my" :facet-queries [{:name "terms" :value "Vocabulary 1"}] :df "fulltext")))))
+    (is (= (query->map "q=my&df=fulltext&facet-queries={:name+\"terms\",+:value+\"Vocabulary+1\"}&facet.query={!raw+f%3Dterms}Vocabulary+1&facet=true&facet.mincount=1")
+           (query->map (search "my" :just-return-query? true :facet-queries [{:name "terms" :value "Vocabulary 1"}] :df "fulltext"))))))
 
 (deftest test-facet-prefix
   (do (add-document! sample-doc)

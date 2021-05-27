@@ -468,7 +468,264 @@
         :query query
         :query-results-obj query-results}))))
 
+(defn do-query
+  [^SolrQuery query
+   {:keys [method request-handler just-return-query?] :as flags}]
+  (when (not-empty request-handler)
+    (.setRequestHandler query request-handler))
+  (doseq [[key value] (dissoc flags :just-return-query?)]
+    (.setParam query (name key) (make-param value)))
+  (if just-return-query?
+    (str query)
+    (let [method (parse-method method)]
+      (let [^QueryResponse query-results (.query ^SolrClient *connection*
+                                                 ^SolrQuery query
+                                                 ^SolrRequest$METHOD method
+                                                 )]
+        (with-meta (list) {:query query :query-results-obj query-results})))))
+                              
+(defn wrap-debug
+  [handler]
+  (fn [^SolrQuery query {:keys [debugQuery] :as flags}]
+    (when debugQuery
+      (.setParam query "debugQuery" (make-param true)))
+    (let [results (handler query (dissoc flags :debugQuery))
+          query-results-obj (:query-results-obj (meta results))]
+      (if (and debugQuery query-results-obj)
+        (vary-meta results assoc :debug (.getDebugMap query-results-obj))
+        results))))
+
+(defn wrap-core-search
+  [handler]
+  (fn [^SolrQuery query {:keys [fields facet-filters] :as flags}]
+    (when (not (empty? fields))
+      (cond (string? fields)
+            (.setFields query (into-array (str/split fields #",")))
+            (or (seq? fields) (vector? fields))
+            (.setFields query (into-array
+                               (map (fn [f]
+                                      (cond (string? f) f
+                                            (keyword? f) (name f)
+                                            :else (throw (Exception. (format "Unsupported field name: %s" f)))))
+                                    fields)))
+            :else (throw (Exception. (format "Unsupported :fields parameter format: %s" fields)))))
+    (.addFilterQuery query (into-array String (filter not-empty (map format-facet-query facet-filters))))
+    (let [search-result (handler query (dissoc flags :facet-filters))
+          ^QueryResponse query-results (:query-results-obj (meta search-result))
+          ^SolrDocumentList results (and query-results (.getResults query-results))]
+      (if (and query-results results)
+        (with-meta (map doc-to-hash results)
+          (assoc (meta search-result)
+                 :rows-total (.getNumFound results)
+                 :start (.getStart results)
+                 :rows-set (count results)
+                 :results-obj results))
+        search-result))))
+
+(defn wrap-highlighting
+  [handler]
+  (fn [^SolrQuery query flags]
+    (let [result (handler query flags)
+          query-results-obj (:query-results-obj (meta result))]
+      (if query-results-obj
+        (vary-meta result assoc :highlighting (.getHighlighting query-results-obj))
+        result))))
+
+(defn wrap-pivoting
+  [handler]
+  (fn [^SolrQuery query
+       {:keys [facet-pivot-fields facet-date-ranges] :as flags}]
+    (doseq [field facet-pivot-fields]
+      (.addFacetPivotField query (into-array String [field])))
+    (let [result (handler query (dissoc flags :facet-pivot-fields :facet-date-ranges))
+          query-results-obj (:query-results-obj (meta result))]
+      (if query-results-obj
+        (vary-meta result assoc :facet-pivot-fields (extract-pivots query-results-obj facet-date-ranges))
+        result))))
+
+(defn wrap-field-statistics
+  [handler]
+  (fn [^SolrQuery query flags]
+    (let [results (handler query flags)
+          query-results (:query-results-obj (meta results))]
+      (if (and query-results (.getFieldStatsInfo query-results))
+        (vary-meta results assoc
+                   :statistics (into {}
+                                     (for [[field info] (.getFieldStatsInfo query-results)]
+                                       [field {:min (.getMin info)
+                                               :max (.getMax info)
+                                               :mean (.getMean info)
+                                               :stddev (.getStddev info)
+                                               :sum (.getSum info)
+                                               :count (.getCount info)
+                                               :missing (.getMissing info)
+                                               }])))
+        results))))
+
+(defn wrap-faceting
+  [handler]
+  (fn [^SolrQuery query
+       {:keys [facet-fields facet-date-ranges facet-numeric-ranges facet-queries facet-mincount facet-hier-sep facet-key-fields] :as flags}]
+    (let [facet-result-formatters (into {} (map #(if (map? %)
+                                                   [(:name %) (:result-formatter % identity)]
+                                                   [% identity])
+                                                facet-fields))
+          facet-key-fields (into {} (map-indexed (fn [i f]
+                                                   [(format "f%d" i) (if (map? f) (:name f) (name f))])
+                                                 facet-fields))
+          facet-field-keys (into {} (map-indexed (fn [i f]
+                                                   [(if (map? f) (:name f) (name f)) (format "f%d" i)])
+                                                 facet-fields))]
+      (let [facet-field-parameters
+            (for [facet-field facet-fields
+                  :let [field-name (if (map? facet-field)
+                                     (:name facet-field)
+                                     (name facet-field))
+                        key (get facet-field-keys field-name)]]
+              (if (map? facet-field)
+                (let [local-params
+                      (reduce-kv (fn [params k v]
+                                   (let [formatter (get facet-parameter-formatters k (get facet-parameter-formatters :default))]
+                                     (if (facet-exclude-parameters k)
+                                       params
+                                       (format "%s %s" params (formatter k v)))))
+                                 (format "!key=%s" key)
+                                 facet-field)]
+                  (format "{%s}%s" local-params field-name))
+                (format "{!key=%s}%s" key field-name)))]
+        (when (not-empty facet-field-parameters)
+          (.addFacetField query (into-array String facet-field-parameters))))
+      (doseq [facet-query facet-queries]
+        (cond (string? facet-query)
+              (.addFacetQuery query facet-query)
+              (map? facet-query)
+              (let [formatted-query (format-facet-query facet-query)]
+                (when (not-empty formatted-query) (.addFacetQuery query formatted-query)))
+              :else (throw (Exception. "Invalid facet query.  Must be a string or a map of {:name, :value, :formatter (optional)}"))))
+      (doseq [{:keys [field start end gap others include hardend missing mincount tag]} facet-date-ranges]
+        (if tag
+          ;; This is a workaround for a Solrj bug that causes tagged queries to be improperly formatted.
+          (do (.setParam query "facet" true)
+              (.add query "facet.range" (into-array String [(format "{!tag=%s}%s" tag field)]))
+              (.add query (format "f.%s.facet.range.start" field)
+                    (into-array String [(tformat/unparse (tformat/formatters :date-time-no-ms)
+                                                         (tcoerce/from-date start))]))
+              (.add query (format "f.%s.facet.range.end" field)
+                    (into-array String [(tformat/unparse (tformat/formatters :date-time-no-ms)
+                                                         (tcoerce/from-date end))]))
+              (.add query (format "f.%s.facet.range.gap" field) (into-array String [gap])))
+          (.addDateRangeFacet query field start end gap))
+        (when missing (.setParam query (format "f.%s.facet.missing" field) true))
+        (when others (.setParam query (format "f.%s.facet.range.other" field) (into-array String others)))
+        (when include (.setParam query (format "f.%s.facet.range.include" field) (into-array String [include])))
+        (when hardend (.setParam query (format "f.%s.facet.range.hardend" field) hardend)))
+      (doseq [{:keys [field start end gap others include hardend missing mincount tag]} facet-numeric-ranges]
+        (assert (instance? Number start))
+        (assert (instance? Number end))
+        (assert (instance? Number gap))
+        (if tag
+          ;; This is a workaround for a Solrj bug that causes tagged queries to be improperly formatted.
+          (do (.setParam query "facet" true)
+              (.add query "facet.range" (into-array String [(format "{!tag=%s}%s" tag field)]))
+              (.add query (format "f.%s.facet.range.start" field) (into-array String [(.toString start)]))
+              (.add query (format "f.%s.facet.range.end" field) (into-array String [(.toString end)]))
+              (.add query (format "f.%s.facet.range.gap" field) (into-array String [(.toString gap)])))
+          (.addNumericRangeFacet query field start end gap))
+        (when missing (.setParam query (format "f.%s.facet.missing" field) true))
+        (when others (.setParam query (format "f.%s.facet.range.other" field) (into-array String others)))
+        (when include (.setParam query (format "f.%s.facet.range.include" field) (into-array String [include])))
+        (when hardend (.setParam query (format "f.%s.facet.range.hardend" field) hardend)))
+      (.setFacetMinCount query (or facet-mincount 1))
+      (let [results (handler query (dissoc flags :facet-fields :facet-numeric-ranges :facet-mincount))
+            query-results (:query-results-obj (meta results))]
+        (if query-results
+          (vary-meta results assoc
+                     :facet-fields (extract-facets query-results facet-hier-sep false facet-result-formatters facet-key-fields)
+                     :facet-range-fields (extract-facet-ranges query-results facet-date-ranges)
+                     :limiting-facet-fields (extract-facets query-results facet-hier-sep true facet-result-formatters facet-key-fields)
+                     :facet-queries (extract-facet-queries facet-queries (.getFacetQuery query-results)))
+          results)))))
+
+(defn wrap-expand
+  [handler]
+  (fn [^SolrQuery query {:keys [expand] :as flags}]
+    (when expand
+      (.setParam query "expand" true)
+      (cond (string? expand)
+            nil
+            (map? expand)
+            (doseq [[key val] expand]
+              (.setParam query (format "expand.%s" (name key)) (into-array String [(str val)])))
+            :else (throw (Exception. "expand parameter must be true or a map"))))
+    (let [results (handler query (dissoc flags :expand))
+          query-results (:query-results-obj (meta results))
+          expanded-results (when (and expand query-results) (.getExpanded-results query-results))]
+      (if (and expand query-results)
+        (with-meta
+          (into {}
+                (for [[key docs] expanded-results]
+                  [key (map doc-to-hash docs)]))
+          (meta results))
+        results))))
+
+(defn wrap-collapse
+  [handler]
+  (fn [^SolrQuery query {:keys [collapse] :as flags}]
+    (when collapse
+      (cond (string? collapse)
+            (.addFilterQuery query (into-array String [(format "{!collapse field=%s}" collapse)]))
+            (map? collapse)
+            (.addFilterQuery query (into-array String [(format "{!collapse %s}"
+                                                               (str/join " "
+                                                                         (for [[key val] collapse]
+                                                                           (format "%s=%s" (name key) val))))]))
+            :else (throw (Exception. "collapse parameter must be string or map"))))
+    (handler query (dissoc flags :expand))))
+
+(defn wrap-cursor-mark
+  [handler]
+  (fn [^SolrQuery query {:keys [cursor-mark] :as flags}]
+    (cond (= cursor-mark true)
+          (.setParam query ^String (CursorMarkParams/CURSOR_MARK_PARAM) (into-array String [(CursorMarkParams/CURSOR_MARK_START)]))
+          (not (nil? cursor-mark))
+          (.setParam query ^String (CursorMarkParams/CURSOR_MARK_PARAM) (into-array String [cursor-mark])))
+    (let [results (handler query (dissoc flags :cursor-mark))
+          query-results (:query-results-obj (meta results))
+          next (when query-results (.getNextCursorMark query-results))]
+      (if (and query-results (or (= cursor-mark true) (not (nil? cursor-mark))))
+        (vary-meta results assoc
+                   :next-cursor-mark next
+                   :cursor-done (.equals next (if (= cursor-mark true)
+                                                (CursorMarkParams/CURSOR_MARK_START)
+                                                cursor-mark)))
+        results))))
+
+(def solr-app
+  (-> do-query
+      wrap-debug
+      wrap-core-search
+      wrap-collapse
+      wrap-expand
+      wrap-cursor-mark
+      wrap-highlighting
+      wrap-faceting
+      wrap-pivoting
+      wrap-field-statistics))
+      
+(defn search*-with-middleware
+  [q flags & [middleware]]
+  (let [^SolrQuery query (cond (string? q) (SolrQuery. q)
+                               (instance? SolrQuery q) q
+                               :else (throw (Exception. "q parameter must be a string or SolrQuery")))
+        middleware (or middleware solr-app)]
+    (middleware query flags)
+    ))
+
 (defn search*
+  [q flags & [middleware]]
+  (search*-with-middleware q flags middleware))
+
+#_(defn search*
   "Query solr through solrj.
    q: Query field
    Optional keys, passed in a map:
@@ -660,250 +917,6 @@
                                                  )]
         ((or response-handler default-search-handler)
          query query-results flags)))))
-
-(defn do-query
-  [^SolrQuery query
-   {:keys [method request-handler just-return-query?] :as flags}]
-  (when (not-empty request-handler)
-    (.setRequestHandler query request-handler))
-  (doseq [[key value] flags]
-    (.setParam query (name key) (make-param value)))
-  (if just-return-query?
-    (with-meta (list) {:query query})
-    (let [method (parse-method method)]
-      (let [^QueryResponse query-results (.query ^SolrClient *connection*
-                                                 ^SolrQuery query
-                                                 ^SolrRequest$METHOD method
-                                                 )]
-        (with-meta (list) {:query query :query-results-obj query-results})))))
-                              
-(defn wrap-debug
-  [handler]
-  (fn [^SolrQuery query {:keys [debugQuery] :as flags}]
-    (when debugQuery
-      (.setParam query "debugQuery" (make-param true)))
-    (let [results (handler query (dissoc flags :debugQuery))]
-      (if debugQuery
-        (vary-meta results assoc :debug (.getDebugMap (:query-results-obj (meta results))))
-        results))))
-
-(defn wrap-core-search
-  [handler]
-  (fn [^SolrQuery query {:keys [fields facet-filters] :as flags}]
-    (when (not (empty? fields))
-      (cond (string? fields)
-            (.setFields query (into-array (str/split fields #",")))
-            (or (seq? fields) (vector? fields))
-            (.setFields query (into-array
-                               (map (fn [f]
-                                      (cond (string? f) f
-                                            (keyword? f) (name f)
-                                            :else (throw (Exception. (format "Unsupported field name: %s" f)))))
-                                    fields)))
-            :else (throw (Exception. (format "Unsupported :fields parameter format: %s" fields)))))
-    (.addFilterQuery query (into-array String (filter not-empty (map format-facet-query facet-filters))))
-    (let [search-result (handler query (dissoc flags :facet-filters))
-          ^QueryResponse query-results (:query-results-obj (meta search-result))
-          ^SolrDocumentList results (.getResults query-results)]
-      (with-meta (map doc-to-hash results)
-        (assoc (meta search-result)
-               :rows-total (.getNumFound results)
-               :start (.getStart results)
-               :rows-set (count results)
-               :results-obj results)))))
-
-(defn wrap-highlighting
-  [handler]
-  (fn [^SolrQuery query flags]
-    (let [result (handler query flags)]
-      (vary-meta result assoc :highlighting (.getHighlighting (:query-results-obj (meta result)))))))
-
-(defn wrap-pivoting
-  [handler]
-  (fn [^SolrQuery query
-       {:keys [facet-pivot-fields facet-date-ranges] :as flags}]
-    (doseq [field facet-pivot-fields]
-      (.addFacetPivotField query (into-array String [field])))
-    (let [result (handler query (dissoc flags :facet-pivot-fields :facet-date-ranges))]
-      (vary-meta result assoc :facet-pivot-fields (extract-pivots (:query-results-obj (meta result))
-                                                                  facet-date-ranges)))))
-
-(defn wrap-field-statistics
-  [handler]
-  (fn [^SolrQuery query flags]
-    (let [results (handler query flags)
-          query-results (:query-results-obj (meta results))]
-      (if (.getFieldStatsInfo query-results)
-        (vary-meta results assoc
-                   :statistics (into {}
-                                     (for [[field info] (.getFieldStatsInfo query-results)]
-                                       [field {:min (.getMin info)
-                                               :max (.getMax info)
-                                               :mean (.getMean info)
-                                               :stddev (.getStddev info)
-                                               :sum (.getSum info)
-                                               :count (.getCount info)
-                                               :missing (.getMissing info)
-                                               }])))
-        results))))
-
-(defn wrap-faceting
-  [handler]
-  (fn [^SolrQuery query
-       {:keys [facet-fields facet-date-ranges facet-numeric-ranges facet-queries facet-mincount facet-hier-sep facet-key-fields] :as flags}]
-    (let [facet-result-formatters (into {} (map #(if (map? %)
-                                                   [(:name %) (:result-formatter % identity)]
-                                                   [% identity])
-                                                facet-fields))
-          facet-key-fields (into {} (map-indexed (fn [i f]
-                                                   [(format "f%d" i) (if (map? f) (:name f) (name f))])
-                                                 facet-fields))
-          facet-field-keys (into {} (map-indexed (fn [i f]
-                                                   [(if (map? f) (:name f) (name f)) (format "f%d" i)])
-                                                 facet-fields))]
-      (let [facet-field-parameters
-            (for [facet-field facet-fields
-                  :let [field-name (if (map? facet-field)
-                                     (:name facet-field)
-                                     (name facet-field))
-                        key (get facet-field-keys field-name)]]
-              (if (map? facet-field)
-                (let [local-params
-                      (reduce-kv (fn [params k v]
-                                   (let [formatter (get facet-parameter-formatters k (get facet-parameter-formatters :default))]
-                                     (if (facet-exclude-parameters k)
-                                       params
-                                       (format "%s %s" params (formatter k v)))))
-                                 (format "!key=%s" key)
-                                 facet-field)]
-                  (format "{%s}%s" local-params field-name))
-                (format "{!key=%s}%s" key field-name)))]
-        (when (not-empty facet-field-parameters)
-          (.addFacetField query (into-array String facet-field-parameters))))
-      (doseq [facet-query facet-queries]
-        (cond (string? facet-query)
-              (.addFacetQuery query facet-query)
-              (map? facet-query)
-              (let [formatted-query (format-facet-query facet-query)]
-                (when (not-empty formatted-query) (.addFacetQuery query formatted-query)))
-              :else (throw (Exception. "Invalid facet query.  Must be a string or a map of {:name, :value, :formatter (optional)}"))))
-      (doseq [{:keys [field start end gap others include hardend missing mincount tag]} facet-date-ranges]
-        (if tag
-          ;; This is a workaround for a Solrj bug that causes tagged queries to be improperly formatted.
-          (do (.setParam query "facet" true)
-              (.add query "facet.range" (into-array String [(format "{!tag=%s}%s" tag field)]))
-              (.add query (format "f.%s.facet.range.start" field)
-                    (into-array String [(tformat/unparse (tformat/formatters :date-time-no-ms)
-                                                         (tcoerce/from-date start))]))
-              (.add query (format "f.%s.facet.range.end" field)
-                    (into-array String [(tformat/unparse (tformat/formatters :date-time-no-ms)
-                                                         (tcoerce/from-date end))]))
-              (.add query (format "f.%s.facet.range.gap" field) (into-array String [gap])))
-          (.addDateRangeFacet query field start end gap))
-        (when missing (.setParam query (format "f.%s.facet.missing" field) true))
-        (when others (.setParam query (format "f.%s.facet.range.other" field) (into-array String others)))
-        (when include (.setParam query (format "f.%s.facet.range.include" field) (into-array String [include])))
-        (when hardend (.setParam query (format "f.%s.facet.range.hardend" field) hardend)))
-      (doseq [{:keys [field start end gap others include hardend missing mincount tag]} facet-numeric-ranges]
-        (assert (instance? Number start))
-        (assert (instance? Number end))
-        (assert (instance? Number gap))
-        (if tag
-          ;; This is a workaround for a Solrj bug that causes tagged queries to be improperly formatted.
-          (do (.setParam query "facet" true)
-              (.add query "facet.range" (into-array String [(format "{!tag=%s}%s" tag field)]))
-              (.add query (format "f.%s.facet.range.start" field) (into-array String [(.toString start)]))
-              (.add query (format "f.%s.facet.range.end" field) (into-array String [(.toString end)]))
-              (.add query (format "f.%s.facet.range.gap" field) (into-array String [(.toString gap)])))
-          (.addNumericRangeFacet query field start end gap))
-        (when missing (.setParam query (format "f.%s.facet.missing" field) true))
-        (when others (.setParam query (format "f.%s.facet.range.other" field) (into-array String others)))
-        (when include (.setParam query (format "f.%s.facet.range.include" field) (into-array String [include])))
-        (when hardend (.setParam query (format "f.%s.facet.range.hardend" field) hardend)))
-      (.setFacetMinCount query (or facet-mincount 1))
-      (let [results (handler query (dissoc flags :facet-fields :facet-numeric-ranges :facet-mincount))
-            query-results (:query-results-obj (meta results))]
-        (vary-meta results assoc
-                   :facet-fields (extract-facets query-results facet-hier-sep false facet-result-formatters facet-key-fields)
-                   :facet-range-fields (extract-facet-ranges query-results facet-date-ranges)
-                   :limiting-facet-fields (extract-facets query-results facet-hier-sep true facet-result-formatters facet-key-fields)
-                   :facet-queries (extract-facet-queries facet-queries (.getFacetQuery query-results)))))))
-
-(defn wrap-expand
-  [handler]
-  (fn [^SolrQuery query {:keys [expand] :as flags}]
-    (when expand
-      (.setParam query "expand" true)
-      (cond (string? expand)
-            nil
-            (map? expand)
-            (doseq [[key val] expand]
-              (.setParam query (format "expand.%s" (name key)) (into-array String [(str val)])))
-            :else (throw (Exception. "expand parameter must be true or a map"))))
-    (let [results (handler query (dissoc flags :expand))
-          query-results (:query-results-obj (meta results))
-          expanded-results (when expand (.getExpanded-results query-results))]
-      (if expand
-        (with-meta
-          (into {}
-                (for [[key docs] expanded-results]
-                  [key (map doc-to-hash docs)]))
-          (meta results))
-        results))))
-
-(defn wrap-collapse
-  [handler]
-  (fn [^SolrQuery query {:keys [collapse] :as flags}]
-    (when collapse
-      (cond (string? collapse)
-            (.addFilterQuery query (into-array String [(format "{!collapse field=%s}" collapse)]))
-            (map? collapse)
-            (.addFilterQuery query (into-array String [(format "{!collapse %s}"
-                                                               (str/join " "
-                                                                         (for [[key val] collapse]
-                                                                           (format "%s=%s" (name key) val))))]))
-            :else (throw (Exception. "collapse parameter must be string or map"))))
-    (handler query (dissoc flags :expand))))
-
-(defn wrap-cursor-mark
-  [handler]
-  (fn [^SolrQuery query {:keys [cursor-mark] :as flags}]
-    (cond (= cursor-mark true)
-          (.setParam query ^String (CursorMarkParams/CURSOR_MARK_PARAM) (into-array String [(CursorMarkParams/CURSOR_MARK_START)]))
-          (not (nil? cursor-mark))
-          (.setParam query ^String (CursorMarkParams/CURSOR_MARK_PARAM) (into-array String [cursor-mark])))
-    (let [results (handler query (dissoc flags :cursor-mark))
-          query-results (:query-results-obj (meta results))
-          next (.getNextCursorMark query-results)]
-      (if (or (= cursor-mark true) (not (nil? cursor-mark)))
-        (vary-meta results assoc
-                   :next-cursor-mark next
-                   :cursor-done (.equals next (if (= cursor-mark true)
-                                                (CursorMarkParams/CURSOR_MARK_START)
-                                                cursor-mark)))
-        results))))
-
-(def solr-app
-  (-> do-query
-      wrap-debug
-      wrap-core-search
-      wrap-collapse
-      wrap-expand
-      wrap-cursor-mark
-      wrap-highlighting
-      wrap-faceting
-      wrap-pivoting
-      wrap-field-statistics))
-      
-(defn search*-with-middleware
-  [q flags & [middleware]]
-  (let [^SolrQuery query (cond (string? q) (SolrQuery. q)
-                               (instance? SolrQuery q) q
-                               :else (throw (Exception. "q parameter must be a string or SolrQuery")))
-        middleware (or middleware solr-app)]
-    (middleware query flags)
-    ))
-
   
 (defn search
   "Query solr through solrj.
