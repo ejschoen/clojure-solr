@@ -298,25 +298,38 @@
        suggestions.  If invoked with a ...&cmd=rebuild, it will rebuild the
        spellchecker index.
   -->
-  <requestHandler name="spellchecker" class="solr.SpellCheckerRequestHandler" startup="lazy">
+
+  <searchComponent name="spellcheck" class="solr.SpellCheckComponent">
+    <lst name="spellchecker">
+      <str name="name">default</str>
+      <str name="field">word</str>
+      <str name="classname">solr.DirectSolrSpellChecker</str>
+      <str name="distanceMeasure">internal</str>
+      <float name="accuracy">0.5</float>
+      <int name="maxEdits">2</int>
+      <int name="minPrefix">1</int>
+      <int name="maxInspections">5</int>
+      <int name="minQueryLength">4</int>
+      <float name="maxQueryFrequency">0.01</float>
+    </lst>
+  </searchComponent>
+
+  <requestHandler name="/spell" class="solr.SearchHandler" startup="lazy">
     <!-- default values for query parameters -->
      <lst name="defaults">
-       <int name="suggestionCount">1</int>
+       <str name="df">fulltext</str>
        <float name="accuracy">0.5</float>
+       <str name="spellcheck.dictionary">default</str>
+       <str name="spellcheck.collate">true</str>
+       <str name="spellcheck.extendedResults">true</str>
+       <str name="spellcheck">true</str>
      </lst>
      
      <!-- Main init params for handler -->
      
-     <!-- The directory where your SpellChecker Index should live.   -->
-     <!-- May be absolute, or relative to the Solr "dataDir" directory. -->
-     <!-- If this option is not specified, a RAM directory will be used -->
-     <str name="spellcheckerIndexDir">spell</str>
-     
-     <!-- the field in your schema that you want to be able to build -->
-     <!-- your spell index on. This should be a field that uses a very -->
-     <!-- simple FieldType without a lot of Analysis (ie: string) -->
-     <str name="termSourceField">word</str>
-     
+     <arr name="last-components">
+       <str>spellcheck</str>
+     </arr>
    </requestHandler>
 
    <requestHandler name="/mlt" class="solr.MoreLikeThisHandler">

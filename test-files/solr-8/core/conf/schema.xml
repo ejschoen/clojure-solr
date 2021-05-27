@@ -262,6 +262,7 @@
    <field name="_version_" type="slong" default="0" docValues="true" multiValued="false" indexed="true" stored="true"/>
    <field name="title" type="text" indexed="true" stored="true" />
    <field name="fulltext" type="text" indexed="true" stored="true" />
+   <field name="word" type="text_ws" indexed="true" stored="true" />
    <field name="created" type="date" indexed="true" stored="true" omitNorms="true" />
    <field name="updated" type="date" indexed="true" stored="true" omitNorms="true" />
    <field name="numeric" type="integer" indexed="true" stored="true" omitNorms="true" />
@@ -295,6 +296,8 @@
         unknown fields indexed and/or stored by default --> 
    <!--dynamicField name="*" type="ignored" multiValued="true" /-->
    
+   <copyField source="fulltext" dest="word"/>
+
  </fields>
 
  <!-- Field to use to determine and enforce document uniqueness. 

@@ -5,7 +5,7 @@
   (:require [clj-time.format :as tformat])
   (:require [clj-time.coerce :as tcoerce])
   (:import (java.net URI)
-           (java.util Base64 HashMap List ArrayList)
+           (java.util Base64 HashMap List ArrayList Map)
            (java.nio.charset Charset)
            (org.apache.http HttpRequest HttpRequestInterceptor HttpHeaders)
            (org.apache.http.auth AuthScope UsernamePasswordCredentials)
@@ -17,6 +17,7 @@
            (org.apache.solr.client.solrj.impl HttpSolrClient HttpSolrClient$Builder HttpClientUtil)
            (org.apache.solr.client.solrj.embedded EmbeddedSolrServer)
            (org.apache.solr.client.solrj.response QueryResponse FacetField PivotField RangeFacet RangeFacet$Count RangeFacet$Date)
+           (org.apache.solr.client.solrj.response SuggesterResponse Suggestion)
            (org.apache.solr.common SolrInputDocument SolrDocumentList)
            (org.apache.solr.common.params ModifiableSolrParams CursorMarkParams MoreLikeThisParams)
            (org.apache.solr.common.util NamedList)
@@ -416,11 +417,68 @@
   {:ex #(format "ex=%s" %2)
    :default #(format "facet.%s=\"%s\"" (name %1) %2)})
 
+(defn default-response-handler
+  "Default handler for the response from Solr.  Returns
+   each document as a map, with metadata for the response and faceting information."
+  [^SolrQuery query ^QueryResponse query-results
+   {:keys [expand cursor-mark facet-hier-sep facet-result-formatters facet-key-fields facet-date-ranges facet-queries] :as flags}]
+  (let [^SolrDocumentList results (.getResults query-results)
+        expanded-results (when expand (.getExpandedResults query-results))]
+    (trace "Query complete")
+    (trace query-results)
+    (when (:debugQuery flags)
+      (trace (.getDebugMap query-results)))
+    (with-meta
+      (if expand
+        (into {}
+              (for [[key docs] expanded-results]
+                [key (map doc-to-hash docs)]))
+        (map doc-to-hash results))
+      (merge
+       (when cursor-mark
+         (let [next  (.getNextCursorMark query-results)]
+           {:next-cursor-mark next
+            :cursor-done (.equals next (if (= cursor-mark true)
+                                         (CursorMarkParams/CURSOR_MARK_START)
+                                         cursor-mark))}))
+       (when (:debugQuery flags)
+         {:debug (.getDebugMap query-results)})
+       (when (.getFieldStatsInfo query-results)
+         {:statistics
+          (into {}
+                (for [[field info] (.getFieldStatsInfo query-results)]
+                  [field {:min (.getMin info)
+                          :max (.getMax info)
+                          :mean (.getMean info)
+                          :stddev (.getStddev info)
+                          :sum (.getSum info)
+                          :count (.getCount info)
+                          :missing (.getMissing info)
+                          }]))})
+       {:start (when results (.getStart results))
+        :rows-set (count results)
+        :rows-total (when results (.getNumFound results))
+        :highlighting (.getHighlighting query-results)
+        :facet-fields (extract-facets query-results facet-hier-sep false facet-result-formatters facet-key-fields)
+        :facet-range-fields (extract-facet-ranges query-results facet-date-ranges)
+        :limiting-facet-fields (extract-facets query-results facet-hier-sep true facet-result-formatters facet-key-fields)
+        :facet-queries (extract-facet-queries facet-queries (.getFacetQuery query-results))
+        :facet-pivot-fields (extract-pivots query-results facet-date-ranges)
+        :results-obj results
+        :query query
+        :query-results-obj query-results}))))
+
 (defn search*
   "Query solr through solrj.
    q: Query field
    Optional keys, passed in a map:
      :method                :get or :post (default :get)
+     :request-handler       Optional non-default request handler (e.g., /suggest)
+     :response-handler      Function of three arguments: 
+                                SolrQuery sent to SolrJ, 
+                                QueryResponse from SolrJ 
+                                flags map
+                            Defaults to default-response-handler.
      :rows                  Number of rows to return (default is Solr default: 1000)
      :start                 Offset into query result at which to start returning rows (default 0)
      :fields                Fields to return
@@ -462,7 +520,7 @@
   Additional keys can be passed, using Solr parameter names as keywords.
   Returns the query results as the value of the call, with faceting results as metadata.
   Use (meta result) to get facet data."
-  [q {:keys [method fields facet-fields facet-date-ranges facet-numeric-ranges facet-queries
+  [q {:keys [method request-handler response-handler fields facet-fields facet-date-ranges facet-numeric-ranges facet-queries
              facet-mincount facet-hier-sep facet-filters facet-pivot-fields cursor-mark
              collapse expand just-return-query?] :as flags}]
   (when *trace-fn*
@@ -589,64 +647,32 @@
             (doseq [[key val] expand]
               (.setParam query (format "expand.%s" (name key)) (into-array String [(str val)])))
             :else (throw (Exception. "expand parameter must be true or a map"))))
+
+    (when (not-empty request-handler)
+      (.setRequestHandler query request-handler))
+
     (trace "Executing query")
     (if just-return-query?
       (str query)
       (let [^QueryResponse query-results (.query ^SolrClient *connection*
                                                  ^SolrQuery query
                                                  ^SolrRequest$METHOD method
-                                                 )
-            ^SolrDocumentList results (.getResults query-results)
-            expanded-results (when expand (.getExpandedResults query-results))]
-        (trace "Query complete")
-        (trace query-results)
-        (when (:debugQuery flags)
-          (trace (.getDebugMap query-results)))
-        (with-meta
-          (if expand
-            (into {}
-                  (for [[key docs] expanded-results]
-                    [key (map doc-to-hash docs)]))
-            (map doc-to-hash results))
-          (merge
-            (when cursor-mark
-              (let [next  (.getNextCursorMark query-results)]
-                {:next-cursor-mark next
-                 :cursor-done (.equals next (if (= cursor-mark true)
-                                              (CursorMarkParams/CURSOR_MARK_START)
-                                              cursor-mark))}))
-            (when (:debugQuery flags)
-              {:debug (.getDebugMap query-results)})
-            (when (.getFieldStatsInfo query-results)
-              {:statistics
-               (into {}
-                     (for [[field info] (.getFieldStatsInfo query-results)]
-                       [field {:min (.getMin info)
-                               :max (.getMax info)
-                               :mean (.getMean info)
-                               :stddev (.getStddev info)
-                               :sum (.getSum info)
-                               :count (.getCount info)
-                               :missing (.getMissing info)
-                               }]))})
-            {:start (when results (.getStart results))
-             :rows-set (count results)
-             :rows-total (when results (.getNumFound results))
-             :highlighting (.getHighlighting query-results)
-             :facet-fields (extract-facets query-results facet-hier-sep false facet-result-formatters facet-key-fields)
-             :facet-range-fields (extract-facet-ranges query-results facet-date-ranges)
-             :limiting-facet-fields (extract-facets query-results facet-hier-sep true facet-result-formatters facet-key-fields)
-             :facet-queries (extract-facet-queries facet-queries (.getFacetQuery query-results))
-             :facet-pivot-fields (extract-pivots query-results facet-date-ranges)
-             :results-obj results
-             :query query
-             :query-results-obj query-results}))))))
+                                                 )]
+        ((or response-handler default-response-handler)
+         query query-results flags)))))
+
   
 (defn search
   "Query solr through solrj.
    q: Query field
    Optional keys:
      :method                :get or :post (default :get)
+     :request-handler       Optional non-default request handler (e.g., /suggest)
+     :response-handler      Function of three arguments: 
+                                SolrQuery sent to SolrJ, 
+                                QueryResponse from SolrJ 
+                                flags map
+                            Defaults to default-response-handler.
      :rows                  Number of rows to return (default is Solr default: 1000)
      :start                 Offset into query result at which to start returning rows (default 0)
      :fields                Fields to return
@@ -773,6 +799,45 @@
                                        :max-results
                                        :method))]
     (map doc-to-hash (:results-obj (meta query-results)))))
+
+(defn suggest-response-handler
+  [_ ^QueryResponse response _]
+  (reverse
+   (sort-by :weight
+            (map (fn [^Suggestion suggestion]
+                   {:term (.getTerm suggestion)
+                    :weight (.getWeight suggestion)})
+                 (get ^Map (.getSuggestions ^SuggesterResponse (.getSuggesterResponse response))
+                      "suggest")))))
+
+(defn spellcheck-response-handler
+  [_ ^QueryResponse response _]
+  (let [scr (.getSpellCheckResponse response)]
+    (if scr
+      {:collated-result (.getCollatedResult scr)
+       :alternatives (mapcat #(.getAlternatives %) (.getSuggestions scr))}
+      nil)))
+
+(defn suggest
+  "Return ordered sequence of term/weight suggestions for a string.
+   Assumes suggest handler is /suggest and uses suggest-response-handler
+   to process result.   Can override via params map, which is merged into map supplied to search*"
+  [suggest-q & [params]]
+  (search* "*:*"
+           (merge {:request-handler "/suggest"
+                   :suggest.q suggest-q
+                   :response-handler suggest-response-handler}
+                  params)))
+
+(defn spellcheck
+  "Return ordered sequence of term/weight suggestions for a string.
+   Assumes suggest handler is /suggest and uses suggest-response-handler
+   to process result.   Can override via params map, which is merged into map supplied to search*"
+  [q & [params]]
+  (search* q
+           (merge {:request-handler "/spell"
+                   :response-handler spellcheck-response-handler}
+                  params)))
 
 (defn delete-id! [id]
   (.deleteById ^SolrClient *connection* id))

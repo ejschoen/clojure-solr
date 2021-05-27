@@ -68,6 +68,7 @@
   <field name="_version_" type="slong" default="0" docValues="true" multiValued="false" indexed="true" stored="true"/>
   <field name="created" type="date" omitNorms="true" indexed="true" stored="true"/>
   <field name="fulltext" type="text" indexed="true" stored="true"/>
+  <field name="word" type="text_ws" indexed="true" stored="true"/>
   <field name="id" type="string" omitNorms="true" multiValued="false" indexed="true" required="true" stored="true"/>
   <field name="numeric" type="integer" omitNorms="true" indexed="true" stored="true"/>
   <field name="provenance" type="string" omitNorms="true" indexed="true" stored="true"/>
@@ -76,6 +77,7 @@
   <field name="title" type="text" indexed="true" stored="true"/>
   <field name="type" type="string" omitNorms="true" multiValued="false" indexed="true" required="true" stored="true"/>
   <field name="updated" type="date" omitNorms="true" indexed="true" stored="true"/>
+  <copyField source="fulltext" dest="word"/>
   <dynamicField name="random*" type="random"/>
   <dynamicField name="*_s_mv" type="string" multiValued="true" indexed="true" stored="true"/>
   <dynamicField name="*_dt" type="date" indexed="true" stored="true"/>
