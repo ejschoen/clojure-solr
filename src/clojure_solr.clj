@@ -418,6 +418,12 @@
    :default #(format "facet.%s=\"%s\"" (name %1) %2)})
 
 (defn do-query
+  "Reach out to Solr on *connection* and execute a query.  
+     :just-return-query? Returns the query string if true, without querying.
+     :method             HTTP method to talk with Solr: POST, GET.
+     :request-handler    Endpoint on Solr, if not /select.
+  Values remaining in flags are supplied as params.
+  Returns an empty document list and basic metadata in meta of the document list."
   [^SolrQuery query
    {:keys [method request-handler just-return-query?] :as flags}]
   (when (not-empty request-handler)
@@ -434,6 +440,7 @@
         (with-meta (list) {:query query :query-results-obj query-results})))))
                               
 (defn wrap-debug
+  "Insert query debugging information if :debugQuery is truthy in flags."
   [handler]
   (fn [^SolrQuery query {:keys [debugQuery] :as flags}]
     (when debugQuery
@@ -445,6 +452,14 @@
         results))))
 
 (defn wrap-core-search
+  "Perform core Solr document search.
+     :rows                  Number of rows to return (default is Solr default: 1000)
+     :start                 Offset into query result at which to start returning rows (default 0)
+     :fields                Fields to return
+     :facet-filters         Solr filter expression on facet values.  Passed as a map in the form:
+                            {:name 'facet-name' :value 'facet-value' :formatter (fn [name value] ...) }
+                            where :formatter is optional and is used to format the query.
+  Returns a sequence of matching documents"
   [handler]
   (fn [^SolrQuery query {:keys [fields facet-filters] :as flags}]
     (when (not (empty? fields))
@@ -472,6 +487,8 @@
         search-result))))
 
 (defn wrap-highlighting
+  "Return highlighting information in the :highlighting entry of result metadata.
+   Requires :hl entries in flags."
   [handler]
   (fn [^SolrQuery query flags]
     (let [result (handler query flags)
@@ -481,6 +498,12 @@
         result))))
 
 (defn wrap-pivoting
+  "Handle pivot results from facet-pivot-fields and facet-date-ranges.
+     :facet-pivot-fields    Vector of pivots to compute, each a list of facet fields.
+                            If a facet is tagged (e.g., {:tag ts} in :facet-date-ranges)  
+                            then the string should be {!range=ts}other-facet.  Otherwise,
+                            use comma separated lists: this-facet,other-facet.
+   Pivots are returned in the :facet-pivot-fields metadata of the result."
   [handler]
   (fn [^SolrQuery query
        {:keys [facet-pivot-fields facet-date-ranges] :as flags}]
@@ -493,6 +516,7 @@
         result))))
 
 (defn wrap-field-statistics
+  "Insert field statistics into metadata of a query result.  Requires :stats true and :stats.field entries in flags."
   [handler]
   (fn [^SolrQuery query flags]
     (let [results (handler query flags)
@@ -512,6 +536,29 @@
         results))))
 
 (defn wrap-faceting
+  "Request faceting, supporting discrete, numeric, and date range faceting.
+     :facet-fields          Discrete-valued fields to facet.  Can be a string, keyword, or map containing
+                            {:name ... :prefix ...}.
+                            Facet fields are returned in :facet-fields of result metadata
+     :facet-queries         Vector of facet queries, each encoded in a string or a map of
+                            {:name, :value, :formatter}.  :formatter is optional and defaults to the raw query formatter.
+                            Facet queries are returned in the :facet-queries metadata of the result.
+     :facet-date-ranges     Date fields to facet as a vector or maps.  Each map contains
+                             :field   Field name
+                             :tag     Optional, for referencing in a pivot facet
+                             :start   Earliest date (as java.util.Date)
+                             :end     Latest date (as java.util.Date)
+                             :gap     Faceting gap, as String, per Solr (+1HOUR, etc)
+                             :others  Comma-separated string: before,after,between,none,all.  Optional.
+                             :include Comma-separated string: lower,upper,edge,outer,all.  Optional.
+                             :hardend Boolean (See Solr doc).  Optional.
+                             :missing Boolean--return empty buckets if true.  Optional.
+                            Faceted date ranges are returned in the :facet-range-fields metadata of the result.
+     :facet-numeric-ranges  Numeric fields to facet, as a vector of maps.  Map fields as for
+                            date ranges, but start, end and gap must be numbers.
+                            Faceted numerc ranges are returned in the :facet-range-fields metadata of the result.
+     :facet-mincount        Minimum number of docs in a facet for the bucket to be returned.
+     :facet-hier-sep        Useful for path hierarchy token faceting.  A regex, such as \\|."
   [handler]
   (fn [^SolrQuery query
        {:keys [facet-fields facet-date-ranges facet-numeric-ranges facet-queries facet-mincount facet-hier-sep facet-key-fields] :as flags}]
@@ -596,6 +643,8 @@
           results)))))
 
 (defn wrap-expand
+  "Request collapsed search results be expanded.
+   Pass :expand as a field name or a map of expand parameters"
   [handler]
   (fn [^SolrQuery query {:keys [expand] :as flags}]
     (when expand
@@ -618,6 +667,8 @@
         results))))
 
 (defn wrap-collapse
+  "Request search results be collapsed by a given field, passed in the :collapse flag, 
+   which can be a string field name or a map containing Solr collapse parameters."
   [handler]
   (fn [^SolrQuery query {:keys [collapse] :as flags}]
     (when collapse
@@ -632,24 +683,32 @@
     (handler query (dissoc flags :expand))))
 
 (defn wrap-cursor-mark
+  "Request cursor-mark cursor handling if :cursor-mark is in flags.  
+   flags must contain a :sort entry that sorts by a unique field if :cursor-mark is enabled.
+   returns :next-cursor-mark and :cursor-done (a boolean) in result metadata."
   [handler]
   (fn [^SolrQuery query {:keys [cursor-mark] :as flags}]
-    (cond (= cursor-mark true)
-          (.setParam query ^String (CursorMarkParams/CURSOR_MARK_PARAM) (into-array String [(CursorMarkParams/CURSOR_MARK_START)]))
-          (not (nil? cursor-mark))
-          (.setParam query ^String (CursorMarkParams/CURSOR_MARK_PARAM) (into-array String [cursor-mark])))
-    (let [results (handler query (dissoc flags :cursor-mark))
-          query-results (:query-results-obj (meta results))
-          next (when query-results (.getNextCursorMark query-results))]
-      (if (and query-results (or (= cursor-mark true) (not (nil? cursor-mark))))
-        (vary-meta results assoc
-                   :next-cursor-mark next
-                   :cursor-done (.equals next (if (= cursor-mark true)
-                                                (CursorMarkParams/CURSOR_MARK_START)
-                                                cursor-mark)))
-        results))))
+    (let [want-cursoring (or (= cursor-mark true) (not (nil? cursor-mark)))]
+      (when (and want-cursoring (not (:sort flags)))
+        (throw (IllegalArgumentException. "Requesting Solr cursor-mark requires a :sort flag specifying a unique field")))
+      (cond (= cursor-mark true)
+            (.setParam query ^String (CursorMarkParams/CURSOR_MARK_PARAM) (into-array String [(CursorMarkParams/CURSOR_MARK_START)]))
+            (not (nil? cursor-mark))
+            (.setParam query ^String (CursorMarkParams/CURSOR_MARK_PARAM) (into-array String [cursor-mark])))
+      (let [results (handler query (dissoc flags :cursor-mark))
+            query-results (:query-results-obj (meta results))
+            next (when query-results (.getNextCursorMark query-results))]
+        (if (and query-results want-cursoring)
+          (vary-meta results assoc
+                     :next-cursor-mark next
+                     :cursor-done (.equals next (if (= cursor-mark true)
+                                                  (CursorMarkParams/CURSOR_MARK_START)
+                                                  cursor-mark)))
+          results)))))
 
 (defn wrap-spellcheck
+  "Request spellcheck.  Return corrections as a map containing the Solr :collated-result and :alternatives
+   in result metadata"
   [handler]
   (fn [^SolrQuery query flags]
     (let [result (handler query (assoc flags :spellcheck true))
@@ -665,6 +724,8 @@
         result))))
 
 (defn wrap-suggest
+  "Request suggestions from search.  Return suggestions as an ordered sequence of maps
+   containing :term and :weight, in result metadata."
   [handler]
   (fn [^SolrQuery query flags]
     (let [result (handler query (assoc flags :suggest true))
