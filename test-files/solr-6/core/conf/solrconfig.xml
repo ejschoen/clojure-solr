@@ -348,6 +348,22 @@
      </arr>
    </requestHandler>
 
+   <requestHandler name="/select-with-spell-and-suggest" class="org.apache.solr.handler.component.SearchHandler">
+     <lst name="defaults">
+       <str name="spellcheck.dictionary">default</str>
+       <str name="spellcheck.collate">true</str>
+       <str name="spellcheck.extendedResults">true</str>
+       <float name="accuracy">0.5</float>
+       <str name="spellcheck">true</str>
+       <str name="suggest">true</str>
+       <str name="suggest.dictionary">suggest</str>
+       <str name="suggest.count">10</str>
+     </lst>
+     <arr name="last-components">
+       <str>spellcheck</str>
+       <str>suggest</str>
+     </arr>
+   </requestHandler>
 
    <requestHandler name="/mlt" class="solr.MoreLikeThisHandler">
      <lst name="defaults">

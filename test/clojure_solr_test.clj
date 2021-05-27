@@ -126,6 +126,12 @@
   (is (= sample-doc (dissoc (first (search "\"my fulltext\""  :df "fulltext")) :_version_)))
   (is (empty? (search "\"fulltext my\""  :df "fulltext"))))
 
+(deftest test-quoted-search-mw
+  (do (add-document! sample-doc)
+      (commit!))
+  (is (= sample-doc (dissoc (first (search*-with-middleware "\"my fulltext\""  {:df "fulltext"})) :_version_ :word)))
+  (is (empty? (search*-with-middleware "\"fulltext my\""  {:df "fulltext"}))))
+
 (deftest test-facet-query
   (do (add-document! sample-doc)
       (commit!))
@@ -462,7 +468,10 @@ At first, spellchecker analyses incoming query words by looking up them in the i
   (let [result (spellcheck "Levenstein" {:df "fulltext"})]
     (println (format "Corrected Levenstein to %s" (:collated-result result)))
     (is (= {:collated-result "Levenshtein" :alternatives '("Levenshtein")}
-           result))))
+           result)))
+  (let [result (search* "Leven" {:df "fulltext"})]
+    )
+  )
 
 
   
