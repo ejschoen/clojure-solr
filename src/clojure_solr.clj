@@ -417,63 +417,12 @@
   {:ex #(format "ex=%s" %2)
    :default #(format "facet.%s=\"%s\"" (name %1) %2)})
 
-(defn default-search-handler
-  "Default handler for the response from Solr.  Returns
-   each document as a map, with metadata for the response and faceting information."
-  [^SolrQuery query ^QueryResponse query-results
-   {:keys [expand cursor-mark facet-hier-sep facet-result-formatters facet-key-fields facet-date-ranges facet-queries] :as flags}]
-  (let [^SolrDocumentList results (.getResults query-results)
-        expanded-results (when expand (.getExpandedResults query-results))]
-    (trace "Query complete")
-    (trace query-results)
-    (when (:debugQuery flags)
-      (trace (.getDebugMap query-results)))
-    (with-meta
-      (if expand
-        (into {}
-              (for [[key docs] expanded-results]
-                [key (map doc-to-hash docs)]))
-        (map doc-to-hash results))
-      (merge
-       (when cursor-mark
-         (let [next  (.getNextCursorMark query-results)]
-           {:next-cursor-mark next
-            :cursor-done (.equals next (if (= cursor-mark true)
-                                         (CursorMarkParams/CURSOR_MARK_START)
-                                         cursor-mark))}))
-       (when (:debugQuery flags)
-         {:debug (.getDebugMap query-results)})
-       (when (.getFieldStatsInfo query-results)
-         {:statistics
-          (into {}
-                (for [[field info] (.getFieldStatsInfo query-results)]
-                  [field {:min (.getMin info)
-                          :max (.getMax info)
-                          :mean (.getMean info)
-                          :stddev (.getStddev info)
-                          :sum (.getSum info)
-                          :count (.getCount info)
-                          :missing (.getMissing info)
-                          }]))})
-       {:start (when results (.getStart results))
-        :rows-set (count results)
-        :rows-total (when results (.getNumFound results))
-        :highlighting (.getHighlighting query-results)
-        :facet-fields (extract-facets query-results facet-hier-sep false facet-result-formatters facet-key-fields)
-        :facet-range-fields (extract-facet-ranges query-results facet-date-ranges)
-        :limiting-facet-fields (extract-facets query-results facet-hier-sep true facet-result-formatters facet-key-fields)
-        :facet-queries (extract-facet-queries facet-queries (.getFacetQuery query-results))
-        :facet-pivot-fields (extract-pivots query-results facet-date-ranges)
-        :results-obj results
-        :query query
-        :query-results-obj query-results}))))
-
 (defn do-query
   [^SolrQuery query
    {:keys [method request-handler just-return-query?] :as flags}]
   (when (not-empty request-handler)
     (.setRequestHandler query request-handler))
-  (doseq [[key value] (dissoc flags :just-return-query?)]
+  (doseq [[key value] (dissoc flags :just-return-query? :facet-pivot-fields :facet-date-ranges :request-handler)]
     (.setParam query (name key) (make-param value)))
   (if just-return-query?
     (str query)
@@ -537,7 +486,7 @@
        {:keys [facet-pivot-fields facet-date-ranges] :as flags}]
     (doseq [field facet-pivot-fields]
       (.addFacetPivotField query (into-array String [field])))
-    (let [result (handler query (dissoc flags :facet-pivot-fields :facet-date-ranges))
+    (let [result (handler query flags)
           query-results-obj (:query-results-obj (meta result))]
       (if query-results-obj
         (vary-meta result assoc :facet-pivot-fields (extract-pivots query-results-obj facet-date-ranges))
@@ -700,6 +649,39 @@
                                                 cursor-mark)))
         results))))
 
+(defn wrap-spellcheck
+  [handler]
+  (fn [^SolrQuery query flags]
+    (let [result (handler query (assoc flags :spellcheck true))
+          query-results (:query-results-obj (meta result))]
+      (if query-results
+        (let [scr (.getSpellCheckResponse query-results)]
+          (if scr
+            (vary-meta result assoc
+                       :spellcheck 
+                       {:collated-result (.getCollatedResult scr)
+                        :alternatives (mapcat #(.getAlternatives %) (.getSuggestions scr))})
+            result))
+        result))))
+
+(defn wrap-suggest
+  [handler]
+  (fn [^SolrQuery query flags]
+    (let [result (handler query (assoc flags :suggest true))
+          query-results (:query-results-obj (meta result))
+          suggester-response (when query-results (.getSuggesterResponse query-results))]
+      (if (and query-results suggester-response)
+        (vary-meta result assoc
+                   :suggestions
+                   (reverse
+                    (sort-by :weight
+                             (map (fn [^Suggestion suggestion]
+                                    {:term (.getTerm suggestion)
+                                     :weight (.getWeight suggestion)})
+                                  (get ^Map (.getSuggestions ^SuggesterResponse suggester-response)
+                                       "suggest")))))
+        result))))
+
 (def solr-app
   (-> do-query
       wrap-debug
@@ -725,210 +707,12 @@
   [q flags & [middleware]]
   (search*-with-middleware q flags middleware))
 
-#_(defn search*
-  "Query solr through solrj.
-   q: Query field
-   Optional keys, passed in a map:
-     :method                :get or :post (default :get)
-     :request-handler       Optional non-default request handler (e.g., /suggest)
-     :response-handler      Function of three arguments: 
-                                SolrQuery sent to SolrJ, 
-                                QueryResponse from SolrJ 
-                                flags map
-                            Defaults to default-search-handler.
-     :rows                  Number of rows to return (default is Solr default: 1000)
-     :start                 Offset into query result at which to start returning rows (default 0)
-     :fields                Fields to return
-     :facet-fields          Discrete-valued fields to facet.  Can be a string, keyword, or map containing
-                            {:name ... :prefix ... :ex (to exclude from filtering)}.
-     :facet-queries         Vector of facet queries, each encoded in a string or a map of
-                            {:name, :value, :formatter}.  :formatter is optional and defaults to the raw query formatter.
-                            The result is in the :facet-queries response.
-     :facet-date-ranges     Date fields to facet as a vector or maps.  Each map contains
-                             :field   Field name
-                             :tag     Optional, for referencing in a pivot facet
-1                             :start   Earliest date (as java.util.Date)
-                             :end     Latest date (as java.util.Date)
-                             :gap     Faceting gap, as String, per Solr (+1HOUR, etc)
-                             :others  Comma-separated string: before,after,between,none,all.  Optional.
-                             :include Comma-separated string: lower,upper,edge,outer,all.  Optional.
-                             :hardend Boolean (See Solr doc).  Optional.
-                             :missing Boolean--return empty buckets if true.  Optional.
-     :facet-numeric-ranges  Numeric fields to facet, as a vector of maps.  Map fields as for
-                            date ranges, but start, end and gap must be numbers.
-     :facet-mincount        Minimum number of docs in a facet for the bucket to be returned.
-     :facet-hier-sep        Useful for path hierarchy token faceting.  A regex, such as \\|.
-     :facet-filters         Solr filter expression on facet values.  Passed as a map in the form:
-                            {:name 'facet-name' :value 'facet-value' 
-                             :formatter (fn [name value] ...)
-                             :full-formatter 'Alternative formatter, takes entire facet-filter map as one parameter'
-                             :tag 'Optional, for referencing in an ex-tag in facet-fields (needs full-formatter option)' }
-                            where :formatter is optional and is used to format the query.
-     :facet-pivot-fields    Vector of pivots to compute, each a list of facet fields.
-                            If a facet is tagged (e.g., {:tag ts} in :facet-date-ranges)  
-                            then the string should be {!range=ts}other-facet.  Otherwise,
-                            use comma separated lists: this-facet,other-facet.
-     :cursor-mark           true -- initial cursor; else a previous cursor value from 
-                            (:next-cursor-mark (meta result))
-     :collapse              field name or map with CollapsingQParser parameters.
-     :expand                true or map with {:rows ... :q ... :fq ... :sort ... }
-                            for the ExpandComponent.
-     :just-return-query?    Just return the query that would be run on Solr
-  Additional keys can be passed, using Solr parameter names as keywords.
-  Returns the query results as the value of the call, with faceting results as metadata.
-  Use (meta result) to get facet data."
-  [q {:keys [method request-handler response-handler fields facet-fields facet-date-ranges facet-numeric-ranges facet-queries
-             facet-mincount facet-hier-sep facet-filters facet-pivot-fields cursor-mark
-             collapse expand just-return-query?] :as flags}]
-  (when *trace-fn*
-    (show-query q flags))
-  (let [flags (dissoc flags :just-return-query?)
-        ^SolrQuery query (cond (string? q) (SolrQuery. q)
-                               (instance? SolrQuery q) q
-                               :else (throw (Exception. "q parameter must be a string or SolrQuery")))
-        method (parse-method method)
-        _ (trace (format "method: %s default-method: %s" method @default-method))
-        facet-result-formatters (into {} (map #(if (map? %)
-                                                 [(:name %) (:result-formatter % identity)]
-                                                 [% identity])
-                                              facet-fields))
-        facet-key-fields (into {} (map-indexed (fn [i f]
-                                                 [(format "f%d" i) (if (map? f) (:name f) (name f))])
-                                               facet-fields))
-        facet-field-keys (into {} (map-indexed (fn [i f]
-                                                 [(if (map? f) (:name f) (name f)) (format "f%d" i)])
-                                               facet-fields))]
-    (doseq [[key value] (dissoc flags
-                                :method :facet-fields :facet-date-ranges :facet-numeric-ranges :facet-filters
-                                :cursor-mark :collapse :expand)]
-      (.setParam query (name key) (make-param value)))
-    (when (not (empty? fields))
-      (cond (string? fields)
-            (.setFields query (into-array (str/split fields #",")))
-            (or (seq? fields) (vector? fields))
-            (.setFields query (into-array
-                               (map (fn [f]
-                                      (cond (string? f) f
-                                            (keyword? f) (name f)
-                                            :else (throw (Exception. (format "Unsupported field name: %s" f)))))
-                                    fields)))
-            :else (throw (Exception. (format "Unsupported :fields parameter format: %s" fields)))))
-
-    ;; How to facet the same attribute different ways (using different prefixes)
-    ;; https://stackoverflow.com/questions/31340400/multiple-facet-prefix-on-a-single-facet-field
-    ;; http://192.168.0.200:8983/solr/i2ksearch/select?facet.field={!key=f1%20facet.prefix="prefix1"}attribute&facet.field={!key=f2%20facet.prefix="prefix 2"}attribute&facet.limit=300&facet.query=attribute:<<query>>&facet=on&fq=attribute:<<query>>&rows=0
-
-    (let [facet-field-parameters
-          (for [facet-field facet-fields
-                :let [field-name (if (map? facet-field)
-                                   (:name facet-field)
-                                   (name facet-field))
-                      key (get facet-field-keys field-name)]]
-            (if (map? facet-field)
-              (let [local-params
-                    (reduce-kv (fn [params k v]
-                                 (let [formatter (get facet-parameter-formatters k (get facet-parameter-formatters :default))]
-                                   (if (facet-exclude-parameters k)
-                                     params
-                                     (format "%s %s" params (formatter k v)))))
-                               (format "!key=%s" key)
-                               facet-field)]
-                (format "{%s}%s" local-params field-name))
-              (format "{!key=%s}%s" key field-name)))]
-      (when (not-empty facet-field-parameters)
-        (.addFacetField query (into-array String facet-field-parameters))))
-
-    (doseq [facet-query facet-queries]
-      (cond (string? facet-query)
-            (.addFacetQuery query facet-query)
-            (map? facet-query)
-            (let [formatted-query (format-facet-query facet-query)]
-              (when (not-empty formatted-query) (.addFacetQuery query formatted-query)))
-            :else (throw (Exception. "Invalid facet query.  Must be a string or a map of {:name, :value, :formatter (optional)}"))))
-    (doseq [{:keys [field start end gap others include hardend missing mincount tag]} facet-date-ranges]
-      (if tag
-        ;; This is a workaround for a Solrj bug that causes tagged queries to be improperly formatted.
-        (do (.setParam query "facet" true)
-            (.add query "facet.range" (into-array String [(format "{!tag=%s}%s" tag field)]))
-            (.add query (format "f.%s.facet.range.start" field)
-                  (into-array String [(tformat/unparse (tformat/formatters :date-time-no-ms)
-                                                         (tcoerce/from-date start))]))
-            (.add query (format "f.%s.facet.range.end" field)
-                  (into-array String [(tformat/unparse (tformat/formatters :date-time-no-ms)
-                                                         (tcoerce/from-date end))]))
-            (.add query (format "f.%s.facet.range.gap" field) (into-array String [gap])))
-        (.addDateRangeFacet query field start end gap))
-      (when missing (.setParam query (format "f.%s.facet.missing" field) true))
-      (when others (.setParam query (format "f.%s.facet.range.other" field) (into-array String others)))
-      (when include (.setParam query (format "f.%s.facet.range.include" field) (into-array String [include])))
-      (when hardend (.setParam query (format "f.%s.facet.range.hardend" field) hardend)))
-    (doseq [{:keys [field start end gap others include hardend missing mincount tag]} facet-numeric-ranges]
-      (assert (instance? Number start))
-      (assert (instance? Number end))
-      (assert (instance? Number gap))
-      (if tag
-        ;; This is a workaround for a Solrj bug that causes tagged queries to be improperly formatted.
-        (do (.setParam query "facet" true)
-            (.add query "facet.range" (into-array String [(format "{!tag=%s}%s" tag field)]))
-            (.add query (format "f.%s.facet.range.start" field) (into-array String [(.toString start)]))
-            (.add query (format "f.%s.facet.range.end" field) (into-array String [(.toString end)]))
-            (.add query (format "f.%s.facet.range.gap" field) (into-array String [(.toString gap)])))
-        (.addNumericRangeFacet query field start end gap))
-      (when missing (.setParam query (format "f.%s.facet.missing" field) true))
-      (when others (.setParam query (format "f.%s.facet.range.other" field) (into-array String others)))
-      (when include (.setParam query (format "f.%s.facet.range.include" field) (into-array String [include])))
-      (when hardend (.setParam query (format "f.%s.facet.range.hardend" field) hardend)))
-    (doseq [field facet-pivot-fields]
-      (.addFacetPivotField query (into-array String [field])))
-    (.addFilterQuery query (into-array String (filter not-empty (map format-facet-query facet-filters))))
-    (.setFacetMinCount query (or facet-mincount 1))
-    (cond (= cursor-mark true)
-          (.setParam query ^String (CursorMarkParams/CURSOR_MARK_PARAM) (into-array String [(CursorMarkParams/CURSOR_MARK_START)]))
-          (not (nil? cursor-mark))
-          (.setParam query ^String (CursorMarkParams/CURSOR_MARK_PARAM) (into-array String [cursor-mark])))
-
-    (when collapse
-      (cond (string? collapse)
-            (.addFilterQuery query (into-array String [(format "{!collapse field=%s}" collapse)]))
-            (map? collapse)
-            (.addFilterQuery query (into-array String [(format "{!collapse %s}"
-                                                               (str/join " "
-                                                                         (for [[key val] collapse]
-                                                                           (format "%s=%s" (name key) val))))]))
-            :else (throw (Exception. "collapse parameter must be string or map"))))
-    (when expand
-      (.setParam query "expand" true)
-      (cond (string? expand)
-            nil
-            (map? expand)
-            (doseq [[key val] expand]
-              (.setParam query (format "expand.%s" (name key)) (into-array String [(str val)])))
-            :else (throw (Exception. "expand parameter must be true or a map"))))
-
-    (when (not-empty request-handler)
-      (.setRequestHandler query request-handler))
-
-    (trace "Executing query")
-    (if just-return-query?
-      (str query)
-      (let [^QueryResponse query-results (.query ^SolrClient *connection*
-                                                 ^SolrQuery query
-                                                 ^SolrRequest$METHOD method
-                                                 )]
-        ((or response-handler default-search-handler)
-         query query-results flags)))))
-  
 (defn search
   "Query solr through solrj.
    q: Query field
    Optional keys:
      :method                :get or :post (default :get)
      :request-handler       Optional non-default request handler (e.g., /suggest)
-     :response-handler      Function of three arguments: 
-                                SolrQuery sent to SolrJ, 
-                                QueryResponse from SolrJ 
-                                flags map
-                            Defaults to default-search-handler.
      :rows                  Number of rows to return (default is Solr default: 1000)
      :start                 Offset into query result at which to start returning rows (default 0)
      :fields                Fields to return
@@ -1094,7 +878,9 @@
   (search* q
            (merge {:request-handler "/spell"
                    :response-handler spellcheck-response-handler}
-                  params)))
+                  params)
+           
+           ))
 
 (defn delete-id! [id]
   (.deleteById ^SolrClient *connection* id))

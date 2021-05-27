@@ -465,15 +465,14 @@ The maxInspections parameter defines the maximum number of possible matches to r
 
 At first, spellchecker analyses incoming query words by looking up them in the index. Only query words, which are absent in index or too rare ones (below maxQueryFrequency ) are considered as misspelled and used for finding suggestions. Words which are frequent than maxQueryFrequency bypass spellchecker unchanged. After suggestions for every misspelled word are found they are filtered for enough frequency with thresholdTokenFrequency as boundary value. These parameters (maxQueryFrequency and thresholdTokenFrequency) can be a percentage (such as .01, or 1%) or an absolute value (such as 4)."}))
   (commit!)
-  (let [result (suggest "Leven" {:df "fulltext"})]
-    (println (format "Best suggestion for \"Leven\": %s" (:term (first result))))
-    (is (= (:term (first result) "Levenshtein"))))
-  (let [result (spellcheck "Levenstein" {:df "fulltext"})]
-    (println (format "Corrected Levenstein to %s" (:collated-result result)))
-    (is (= {:collated-result "Levenshtein" :alternatives '("Levenshtein")}
-           result)))
-  (let [result (search* "Leven" {:df "fulltext"})]
-    )
+  (let [result (search* "Leven" {:df "fulltext" :request-handler "/suggest"} (wrap-suggest solr-app))
+        suggestion (:term (first (:suggestions (meta result))))]
+    (println (format "Best suggestion for \"Leven\": %s" suggestion))
+    (is (= suggestion "Levenshtein")))
+  (let [result (search* "Levenstein" {:df "fulltext" :request-handler "/spell"} (wrap-spellcheck solr-app))
+        spellcheck (:spellcheck (meta result))]
+    (println (format "Corrected Levenstein to %s" (:collated-result spellcheck)))
+    (is (= {:collated-result "Levenshtein" :alternatives '("Levenshtein")} spellcheck)))
   )
 
 
