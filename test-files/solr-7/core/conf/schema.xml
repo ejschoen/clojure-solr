@@ -144,6 +144,15 @@
       </analyzer>
     </fieldType>
 
+    <!-- A text field that works for spelling correction -->
+    <fieldType name="text_spell" class="solr.TextField" positionIncrementGap="100">
+      <analyzer>
+        <tokenizer class="solr.WhitespaceTokenizerFactory"/>
+        <filter class="solr.StopFilterFactory" ignoreCase="true" words="stopwords.txt"/>
+        <filter class="solr.RemoveDuplicatesTokenFilterFactory"/>
+      </analyzer>
+    </fieldType>
+
     <!-- A text field that uses WordDelimiterFilter to enable splitting and matching of
         words on case-change, alpha numeric boundaries, and non-alphanumeric chars,
         so that a query of "wifi" or "wi fi" could match a document containing "Wi-Fi".
@@ -262,7 +271,7 @@
    <field name="_version_" type="slong" default="0" docValues="true" multiValued="false" indexed="true" stored="true"/>
    <field name="title" type="text" indexed="true" stored="true" />
    <field name="fulltext" type="text" indexed="true" stored="true" />
-   <field name="word" type="text_ws" indexed="true" stored="true" />
+   <field name="word" type="text_spell" indexed="true" stored="false" />
    <field name="created" type="date" indexed="true" stored="true" omitNorms="true" />
    <field name="updated" type="date" indexed="true" stored="true" omitNorms="true" />
    <field name="numeric" type="integer" indexed="true" stored="true" omitNorms="true" />

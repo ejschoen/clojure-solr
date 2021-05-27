@@ -334,6 +334,33 @@
      </arr>
    </requestHandler>
 
+   <searchComponent name="suggest" class="solr.SuggestComponent">
+     <lst name="suggester">
+       <str name="name">suggest</str>
+       <str name="classname">org.apache.solr.spelling.suggest.Suggester</str>
+       <str name="lookupImpl">org.apache.solr.spelling.suggest.fst.AnalyzingLookupFactory</str>
+       <str name="suggestAnalyzerFieldType">string</str>
+       <str name="storeDir">dict_ac</str>
+       <str name="fieldType">string</str>
+       <str name="field">word</str>
+       <float name="threshold">0.0</float>
+       <str name="buildOnCommit">true</str>
+     </lst>
+   </searchComponent>
+
+   <requestHandler name="/suggest" class="org.apache.solr.handler.component.SearchHandler">
+     <!-- default values for query parameters -->
+     <lst name="defaults">
+       <str name="suggest">true</str>
+       <str name="suggest.dictionary">suggest</str>
+       <str name="suggest.count">10</str>
+     </lst>
+     <arr name="components">
+       <str>suggest</str>
+     </arr>
+   </requestHandler>
+
+
 
    <requestHandler name="/mlt" class="solr.MoreLikeThisHandler">
      <lst name="defaults">
