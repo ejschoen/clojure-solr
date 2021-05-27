@@ -708,7 +708,7 @@
 
 (defn wrap-spellcheck
   "Request spellcheck.  Return corrections as a map containing the Solr :collated-result and :alternatives
-   in result metadata"
+   in result metadata. Injects :spell true into parameters (use this middleware sparingly)."
   [handler]
   (fn [^SolrQuery query flags]
     (let [result (handler query (assoc flags :spellcheck true))
@@ -725,10 +725,17 @@
 
 (defn wrap-suggest
   "Request suggestions from search.  Return suggestions as an ordered sequence of maps
-   containing :term and :weight, in result metadata."
+   containing :term and :weight, in result metadata.
+   Injects :suggest true into parameters (use this middleware sparingly).
+   If suggest.q is not provided, injects q as suggest.q with leading and trailing * removed."
   [handler]
   (fn [^SolrQuery query flags]
-    (let [result (handler query (assoc flags :suggest true))
+    (let [result (handler query (merge flags
+                                       {:suggest true}
+                                       (if (not (:suggest.q flags))
+                                         {:suggest.q (-> (.getQuery query)
+                                                         (str/replace #"^\*" "")
+                                                         (str/replace #"\*$" ""))})))
           query-results (:query-results-obj (meta result))
           suggester-response (when query-results (.getSuggesterResponse query-results))]
       (if (and query-results suggester-response)

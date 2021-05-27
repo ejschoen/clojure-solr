@@ -473,6 +473,13 @@ At first, spellchecker analyses incoming query words by looking up them in the i
         spellcheck (:spellcheck (meta result))]
     (println (format "Corrected Levenstein to %s" (:collated-result spellcheck)))
     (is (= {:collated-result "Levenshtein" :alternatives '("Levenshtein")} spellcheck)))
+  (let [result (search* "Levenshte*" {:df "fulltext" :request-handler "/select-with-spell-and-suggest"}
+                        (-> solr-app wrap-spellcheck wrap-suggest))
+        suggestions (:suggestions (meta result))
+        spellcheck (:spellcheck (meta result))]
+    (is (= 10 (count result)))
+    (is (not-empty suggestions))
+    (is spellcheck))
   )
 
 
