@@ -1,5 +1,6 @@
 (ns clojure-solr-test
   (:require [clojure.pprint]
+            [clojure.java.io :as io]
             [clojure.string :as str])
   (:import (java.util.jar Manifest))
   (:import (org.apache.solr.client.solrj.embedded EmbeddedSolrServer))
@@ -481,6 +482,35 @@ At first, spellchecker analyses incoming query words by looking up them in the i
     (is (not-empty suggestions))
     (is spellcheck))
   )
+
+(deftest test-spellchecker-Volve-files
+  (let [docs (with-open [s (io/input-stream "test/resources/Volve/docs.json")
+                         reader (io/reader s)]
+               (doall (cheshire/parse-stream reader true)))
+        docs (for [doc docs]
+               (assoc doc :fulltext (str/join "/n/n" (map #(str/replace % #"\d+::" "")
+                                                          (get doc :pagetext)))))]
+    (doseq [doc docs] (add-document! doc))
+  (commit!)
+  (is (= 2 (count docs)))
+  (is (every? (fn [d] (not-empty (:fulltext d))) docs))
+  (is (= 2 (count (search* "Equinor" {:df "fulltext"}))))
+  (when (not (is (= 2 (count (search* "Equinor" {:df "word"})))))
+    (let [edocs (search* "Equinor" {:df "word"})]
+      (doseq [doc edocs]
+        (println (format "Found Equinor in doc id %s" (:id doc)))))
+    )
+  (let [result (search* "Equiner" {:df "fulltext" :request-handler "/spell"} (wrap-spellcheck solr-app))
+        spellcheck (:spellcheck (meta result))]
+    (println (format "Corrected Equiner to %s" (:collated-result spellcheck)))
+    (is (empty? result))
+    (is (= {:collated-result "Equinor" :alternatives '("Equinor")} spellcheck)))
+  (let [result (search* "Equiner" {:df "pagetext" :request-handler "/spell-mv"} (wrap-spellcheck solr-app))
+        spellcheck (:spellcheck (meta result))]
+    (println (format "Corrected Equiner to %s" (:collated-result spellcheck)))
+    (is (empty? result))
+    (is (= {:collated-result "Equinor" :alternatives '("Equinor")} spellcheck)))
+  ))
 
 
   

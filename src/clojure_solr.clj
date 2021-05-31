@@ -379,37 +379,6 @@
                                :else nil)]))
         (range 0 (.size facet-pivot)))))))
 
-(defn show-query
-  [q flags]
-  (trace "Solr Query:")
-  (trace q)
-  (trace "  Facet filters:")
-  (if (not-empty (:facet-filters flags))
-    (doseq [ff (:facet-filters flags)]
-      (trace (format "    %s" (pr-str (format-facet-query ff)))))
-    (trace "    none"))
-  (trace "  Facet queries:")
-  (if (not-empty (:facet-queries flags))
-    (doseq [ff (:facet-queries flags)]
-      (trace (format "    %s" (format-facet-query ff))))
-    (trace "    none"))
-  (trace "  Facet fields:")
-  (if (not-empty (:facet-fields flags))
-    (doseq [ff (:facet-fields flags)]
-      (trace (format "    %s" (if (map? ff) (pr-str ff) ff))))
-    (trace "    none"))
-  (trace "  Facet Numeric Ranges")
-  (if (not-empty (:facet-numeric-ranges flags))
-    (doseq [ff (:facet-numeric-ranges flags)]
-      (trace (format "    start: %s gap: %s end: %s" (:start ff) (:gap ff) (:end ff))))
-    (trace "    none"))
-  (let [other (dissoc flags :facet-filters :facet-qieries :facet-fields)]
-    (when (not-empty other)
-      (trace "  Other parameters to Solr:")
-      (doseq [[k v] other]
-        (trace (format "  %s: %s" k (pr-str v))))))
-  )
-
 (def facet-exclude-parameters
   #{:name :result-formatter})
 
@@ -439,6 +408,39 @@
                                                  )]
         (with-meta (list) {:query query :query-results-obj query-results})))))
                               
+(defn wrap-show-query
+  [handler & {:keys [trace-fn] :or {trace-fn *trace-fn*}}]
+  (fn [q flags]
+    (binding [*trace-fn* trace-fn]
+      (trace "Solr Query:")
+      (trace q)
+      (trace "  Facet filters:")
+      (if (not-empty (:facet-filters flags))
+        (doseq [ff (:facet-filters flags)]
+          (trace (format "    %s" (pr-str (format-facet-query ff)))))
+        (trace "    none"))
+      (trace "  Facet queries:")
+      (if (not-empty (:facet-queries flags))
+        (doseq [ff (:facet-queries flags)]
+          (trace (format "    %s" (format-facet-query ff))))
+        (trace "    none"))
+      (trace "  Facet fields:")
+      (if (not-empty (:facet-fields flags))
+        (doseq [ff (:facet-fields flags)]
+          (trace (format "    %s" (if (map? ff) (pr-str ff) ff))))
+        (trace "    none"))
+      (trace "  Facet Numeric Ranges")
+      (if (not-empty (:facet-numeric-ranges flags))
+        (doseq [ff (:facet-numeric-ranges flags)]
+          (trace (format "    start: %s gap: %s end: %s" (:start ff) (:gap ff) (:end ff))))
+        (trace "    none"))
+      (let [other (dissoc flags :facet-filters :facet-qieries :facet-fields)]
+        (when (not-empty other)
+          (trace "  Other parameters to Solr:")
+          (doseq [[k v] other]
+            (trace (format "  %s: %s" k (pr-str v)))))))
+      (handler q flags)))
+
 (defn wrap-debug
   "Insert query debugging information if :debugQuery is truthy in flags."
   [handler]
@@ -752,6 +754,7 @@
 
 (def solr-app
   (-> do-query
+      wrap-show-query
       wrap-debug
       wrap-core-search
       wrap-collapse
@@ -767,9 +770,8 @@
   (let [^SolrQuery query (cond (string? q) (SolrQuery. q)
                                (instance? SolrQuery q) q
                                :else (throw (Exception. "q parameter must be a string or SolrQuery")))
-        middleware (or middleware solr-app)]
-    (middleware query flags)
-    ))
+        middleware (or middleware (:middleware flags) solr-app)]
+    (middleware query (dissoc flags :middleware))))
 
 (defn search*
   [q flags & [middleware]]
