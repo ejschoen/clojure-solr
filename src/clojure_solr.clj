@@ -113,16 +113,21 @@
             (set-credentials uri name password)))
         details))))
 
-(defn ^HttpSolrClient connect [url & conn-manager]
+(defn ^HttpSolrClient connect [url & [conn-manager solr-client-options]]
   "Create an HttpSolrClient connection to a Solr URI. Optionally use
    a provided connection-manager, such as PoolingHttpClientConnectionManager,
    for situations where Solr's default connection manager cannot keep up
-   with demand."
+   with demand.
+   solr-client-options is a map with:
+     :allow-compression true/false
+     :kerberos-delegation-token string
+     :socket-time int in millis
+     :connection-timeout int in millis"
   (let [params (ModifiableSolrParams.)
         {:keys [clean-url name password]} (get-url-details url)
         builder (doto (HttpClientBuilder/create)
                   (.setDefaultCredentialsProvider credentials-provider)
-                  (.setConnectionManager (when conn-manager (first conn-manager)))
+                  (cond-> conn-manager (.setConnectionManager conn-manager))
                   (.addInterceptorFirst 
                    (reify 
                      HttpRequestInterceptor
@@ -137,7 +142,15 @@
                               (.update auth-state (BasicScheme.) creds)))))))))
         client ^CloseableHttpClient (.build builder)
         solr-builder ^HttpSolrClient$Builder (doto (HttpSolrClient$Builder. clean-url)
-                                               (.withHttpClient client))]
+                                               (.withHttpClient client)
+                                               (cond-> (#{true false} (:allow-compression solr-client-options))
+                                                 (.allowCompression (:allow-compression solr-client-options)))
+                                               (cond-> (not-empty (:kerberos-delegation-token solr-client-options))
+                                                 (.withKerberosDelegationToken (:kerberos-delegation-token solr-client-options)))
+                                               (cond-> (:socket-timeout solr-client-options)
+                                                 (.withSocketTimeout (:socket-timeout solr-client-options)))
+                                               (cond-> (:connection-timeout solr-client-options)
+                                                 (.withSocketTimeout (:connection-timeout solr-client-options))))]
     (.build solr-builder)))
 
 (defn- make-document [boost-map doc]

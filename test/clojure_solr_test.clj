@@ -89,7 +89,7 @@
 (deftest test-add-doc-with-lazyseq
   (add-document! {:id 2 :type "pdf" :related_s_mv (cheshire/parse-string "[\"abc\",\"def\"]")})
   (commit!)
-  (let [result (first (search "*" :facet-filters [{:name "id" :value "2"}]))]
+  (let [result (first (search "*" :facet-filters [{:name "id" :value "2"}] :df "fulltext"))]
     (is result)
     (is (vector? (:related_s_mv result)))
     (is (= #{"abc" "def"} (set (:related_s_mv result)))))
@@ -503,7 +503,7 @@
   (is (= 2 (count docs)))
   (is (every? (fn [d] (not-empty (:fulltext d))) docs))
   (is (= 2 (count (search* "Equinor" {:df "fulltext"}))))
-  (when (not (is (= 2 (count (search* "Equinor" {:df "word"})))))
+  (when (not (is (= 1 (count (search* "Equinor" {:df "word"})))))
     (let [edocs (search* "Equinor" {:df "word"})]
       (doseq [doc edocs]
         (println (format "Found Equinor in doc id %s" (:id doc)))))
@@ -512,12 +512,30 @@
         spellcheck (:spellcheck (meta result))]
     (println (format "Corrected Equiner to %s" (:collated-result spellcheck)))
     (is (empty? result))
-    (is (= {:collated-result "Equinor" :alternatives '("Equinor")} spellcheck)))
+    (is (= {:collated-result "Equinor"
+            :is-correctly-spelled? false
+            :alternatives {"Equiner"
+                           {:num-found 1
+                            :original-frequency 0
+                            :start-offset 0
+                            :end-offset 7
+                            :alternatives ["Equinor"]
+                            :alternative-frequencies [1]}}}
+           spellcheck)))
   (let [result (search* "Equiner" {:df "pagetext" :request-handler "/spell-mv"} (wrap-spellcheck solr-app))
         spellcheck (:spellcheck (meta result))]
     (println (format "Corrected Equiner to %s" (:collated-result spellcheck)))
     (is (empty? result))
-    (is (= {:collated-result "Equinor" :alternatives '("Equinor")} spellcheck)))
+    (is (= {:collated-result "Equinor"
+            :is-correctly-spelled? false
+            :alternatives {"Equiner"
+                           {:num-found 1
+                            :original-frequency 0
+                            :start-offset 0
+                            :end-offset 7
+                            :alternatives ["Equinor"]
+                            :alternative-frequencies [1]}}}
+           spellcheck)))
   ))
 
 (deftest test-suggester

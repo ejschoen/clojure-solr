@@ -314,6 +314,21 @@
     </lst>
   </searchComponent>
 
+  <searchComponent name="spellcheck_mv" class="solr.SpellCheckComponent">
+    <lst name="spellchecker">
+      <str name="name">default_mv</str>
+      <str name="field">word_mv</str>
+      <str name="classname">solr.DirectSolrSpellChecker</str>
+      <str name="distanceMeasure">internal</str>
+      <float name="accuracy">0.5</float>
+      <int name="maxEdits">2</int>
+      <int name="minPrefix">1</int>
+      <int name="maxInspections">5</int>
+      <int name="minQueryLength">4</int>
+      <float name="maxQueryFrequency">0.01</float>
+    </lst>
+  </searchComponent>
+
   <requestHandler name="/spell" class="solr.SearchHandler" startup="lazy">
     <!-- default values for query parameters -->
      <lst name="defaults">
@@ -329,6 +344,27 @@
      
      <arr name="last-components">
        <str>spellcheck</str>
+     </arr>
+   </requestHandler>
+
+   <requestHandler name="/spell-mv" class="org.apache.solr.handler.component.SearchHandler" startup="lazy">
+    <!-- default values for query parameters -->
+     <lst name="defaults">
+       <int name="suggestionCount">1</int>
+       <float name="accuracy">0.5</float>
+       <str name="spellcheck.dictionary">default_mv</str>
+       <str name="spellcheck.collate">true</str>
+       <str name="spellcheck.extendedResults">true</str>
+       <str name="spellcheck">true</str>
+     </lst>
+     
+     <!-- Main init params for handler -->
+     
+     <!-- the field in your schema that you want to be able to build -->
+     <!-- your spell index on. This should be a field that uses a very -->
+     <!-- simple FieldType without a lot of Analysis (ie: string) -->
+     <arr name="last-components">
+       <str>spellcheck_mv</str>
      </arr>
    </requestHandler>
 
