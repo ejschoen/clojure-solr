@@ -15,17 +15,6 @@
   (:import [java.nio.charset StandardCharsets]
            [org.apache.commons.codec.binary Base64]))
 
-(defn get-solr-version
-  []
-  (let [name (format "%s.class" (.getSimpleName EmbeddedSolrServer))
-        resource (str (.getResource EmbeddedSolrServer name))]
-    (if (re-matches #"jar:.+" resource)
-      (let [manifest-name (str (subs resource 0 (inc (.lastIndexOf resource "!"))) "/META-INF/MANIFEST.MF")]
-        (with-open [s (.openStream (java.net.URL. manifest-name))]
-          (let [manifest (Manifest. s)
-                attrs (.getMainAttributes manifest)]
-            (.getValue attrs "Specification-Version")))))))
-
 (defn get-solr-home-dir
   []
   (let [version (get-solr-version)]

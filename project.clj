@@ -40,9 +40,11 @@
              :1.8 {:dependencies [[org.clojure/clojure "1.8.0"]]}
              :1.9 {:dependencies [[org.clojure/clojure "1.9.0"]]}
              :1.10 {:dependencies [[org.clojure/clojure "1.10.1"]]}
-             :solr8 {:dependencies [[org.apache.solr/solr-core "8.6.3" :exclusions [commons-fileupload joda-time]]
+             :solr8 {:pom-addition [:properties ["solrj.major.version" "8"]]
+                     :dependencies [[org.apache.solr/solr-core "8.6.3" :exclusions [commons-fileupload joda-time]]
                                     [org.apache.solr/solr-solrj "8.6.3"]]}
-             :solr7 {:dependencies [[org.apache.solr/solr-core "7.7.3"
+             :solr7 {:pom-addition [:properties ["solrj.major.version" "7"]]
+                     :dependencies [[org.apache.solr/solr-core "7.7.3"
                                      :exclusions [commons-fileupload joda-time
                                                   com.google.protobuf/protobuf-java
                                                   com.fasterxml.jackson.core/jackson-databind
@@ -69,7 +71,8 @@
                                                   org.codehaus.jackson/jackson-mapper-asl
                                                   dom4j/dom4j]]
                                     [org.apache.solr/solr-solrj "7.7.3"]]}
-             :solr6 {:dependencies [[org.apache.solr/solr-core "6.6.6"
+             :solr6 {:pom-addition [:properties ["solrj.major.version" "6"]]
+                     :dependencies [[org.apache.solr/solr-core "6.6.6"
                                      :exclusions [commons-fileupload joda-time
                                                   com.fasterxml.jackson.core/jackson-core
                                                   com.fasterxml.jackson.core/jackson-dataformat-smile

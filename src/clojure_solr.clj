@@ -10,11 +10,13 @@
            (org.apache.http HttpRequest HttpRequestInterceptor HttpHeaders)
            (org.apache.http.auth AuthScope UsernamePasswordCredentials)
            (org.apache.http.client.protocol HttpClientContext)
+           (org.apache.http.config SocketConfig SocketConfig$Builder)
            (org.apache.http.impl.auth BasicScheme)
            (org.apache.http.impl.client BasicCredentialsProvider HttpClientBuilder CloseableHttpClient)
            (org.apache.http.protocol HttpContext HttpCoreContext)
            (org.apache.solr.client.solrj SolrQuery SolrRequest$METHOD SolrClient)
            (org.apache.solr.client.solrj.impl HttpSolrClient HttpSolrClient$Builder HttpClientUtil)
+           (java.util.jar Manifest)
            (org.apache.solr.client.solrj.embedded EmbeddedSolrServer)
            (org.apache.solr.client.solrj.response QueryResponse
                                                   FacetField PivotField
@@ -39,6 +41,27 @@
 
 (def http-methods {:get SolrRequest$METHOD/GET, :GET SolrRequest$METHOD/GET
                    :post SolrRequest$METHOD/POST, :POST SolrRequest$METHOD/POST})
+
+(defn get-solr-version
+  []
+  (let [name (format "%s.class" (.getSimpleName EmbeddedSolrServer))
+        resource (str (.getResource EmbeddedSolrServer name))]
+    (if (re-matches #"jar:.+" resource)
+      (let [manifest-name (str (subs resource 0 (inc (.lastIndexOf resource "!"))) "/META-INF/MANIFEST.MF")]
+        (with-open [s (.openStream (java.net.URL. manifest-name))]
+          (let [manifest (Manifest. s)
+                attrs (.getMainAttributes manifest)]
+            (.getValue attrs "Specification-Version")))))))
+
+(def ^:dynamic *solr-version* (get-solr-version))
+
+(defn set-solr-version!
+  [version-string]
+  (alter-var-root #'*solr-version* (constantly version-string)))
+
+(defn get-solr-major-version
+  []
+  (Integer/parseInt (second (re-matches #"(\d+)\.(\d+)\.(\d+)" *solr-version*))))
 
 (defn set-default-method!
   "Set the default method for Solr requests."
@@ -121,13 +144,19 @@
    solr-client-options is a map with:
      :allow-compression true/false
      :kerberos-delegation-token string
-     :socket-time int in millis
+     :socket-timeout int in millis
      :connection-timeout int in millis"
-  (let [params (ModifiableSolrParams.)
+  (let [solr-major-version (get-solr-major-version)
         {:keys [clean-url name password]} (get-url-details url)
-        builder (doto (HttpClientBuilder/create)
+        builder (doto ^HttpClientBuilder (HttpClientBuilder/create)
                   (.setDefaultCredentialsProvider credentials-provider)
                   (cond-> conn-manager (.setConnectionManager conn-manager))
+                  (cond-> (and (:socket-timeout solr-client-options)
+                               (< solr-major-version 7))
+                    (.setDefaultSocketConfig (let [scbuilder (doto ^SocketConfig$Builder (SocketConfig/custom)
+                                                               (.setSoTimeout (int (:socket-timeout solr-client-options))))]
+                                               (.build scbuilder))))
+                                             
                   (.addInterceptorFirst 
                    (reify 
                      HttpRequestInterceptor
@@ -147,11 +176,14 @@
                                                  (.allowCompression (:allow-compression solr-client-options)))
                                                (cond-> (not-empty (:kerberos-delegation-token solr-client-options))
                                                  (.withKerberosDelegationToken (:kerberos-delegation-token solr-client-options)))
-                                               (cond-> (:socket-timeout solr-client-options)
+                                               (cond-> (and (:socket-timeout solr-client-options)
+                                                            (>= solr-major-version 7))
                                                  (.withSocketTimeout (:socket-timeout solr-client-options)))
-                                               (cond-> (:connection-timeout solr-client-options)
-                                                 (.withSocketTimeout (:connection-timeout solr-client-options))))]
-    (.build solr-builder)))
+                                               (cond-> (and (:connection-timeout solr-client-options)
+                                                            (>= solr-major-version 7))
+                                                 (.withConnectionTimeout (:connection-timeout solr-client-options))))]
+    (let [^HttpSolrClient client (.build solr-builder)]
+      client)))
 
 (defn- make-document [boost-map doc]
   (let [^SolrInputDocument sdoc (SolrInputDocument. (make-array String 0))]
