@@ -68,12 +68,14 @@
   <!-- A text field that works for spelling correction -->
   <fieldType name="text_spell" class="solr.TextField" positionIncrementGap="100">
     <analyzer>
+      <!-- <tokenizer class="solr.StandardTokenizerFactory"/>-->
       <tokenizer class="solr.WhitespaceTokenizerFactory"/>
-      <filter class="solr.StopFilterFactory" ignoreCase="true" words="stopwords.txt"/>
-      <filter class="solr.WordDelimiterGraphFilterFactory"
-              generateWordParts="1" splitOnCaseChange="0" stemEnglishPossessive="1"/>
-      <filter class="solr.FlattenGraphFilterFactory"/>
-      <filter class="solr.RemoveDuplicatesTokenFilterFactory"/>
+      <!-- <filter class="solr.LowerCaseFilterFactory"/> -->
+      <filter class="solr.ASCIIFoldingFilterFactory"/>
+      <!-- <filter class="solr.StopFilterFactory" ignoreCase="true" words="stopwords.txt"/> -->
+      <!-- <filter class="solr.WordDelimiterGraphFilterFactory" generateWordParts="1" splitOnCaseChange="0" stemEnglishPossessive="1"/> -->
+      <!-- <filter class="solr.FlattenGraphFilterFactory"/> -->
+      <!-- <filter class="solr.RemoveDuplicatesTokenFilterFactory"/> -->
     </analyzer>
   </fieldType>
   <field name="_version_" type="slong" default="0" docValues="true" multiValued="false" indexed="true" stored="true"/>
@@ -81,7 +83,7 @@
   <field name="fulltext" type="text" indexed="true" stored="true"/>
   <field name="pagetext" type="text" indexed="true" stored="true" multiValued="true"/>
   <field name="word" type="text_spell" indexed="true" stored="false"/>
-  <field name="word_mv" type="text_spell" indexed="true" stored="false" multiValued="true"/>
+  <field name="word_mv" type="text_spell" indexed="true" stored="true" multiValued="true"/>
   <field name="id" type="string" omitNorms="true" multiValued="false" indexed="true" required="true" stored="true"/>
   <field name="numeric" type="integer" omitNorms="true" indexed="true" stored="true"/>
   <field name="provenance" type="string" omitNorms="true" indexed="true" stored="true"/>
@@ -90,6 +92,8 @@
   <field name="title" type="text" indexed="true" stored="true"/>
   <field name="type" type="string" omitNorms="true" multiValued="false" indexed="true" required="true" stored="true"/>
   <field name="updated" type="date" omitNorms="true" indexed="true" stored="true"/>
+  <field name="suggestion" type="string" indexed="true" stored="true" multiValued="true"/>
+  <field name="client" type="string" indexed="true" stored="true"/>
   <copyField source="fulltext" dest="word"/>
   <copyField source="pagetext" dest="word_mv"/>
   <dynamicField name="random*" type="random"/>

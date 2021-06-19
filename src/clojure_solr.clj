@@ -16,7 +16,10 @@
            (org.apache.solr.client.solrj SolrQuery SolrRequest$METHOD SolrClient)
            (org.apache.solr.client.solrj.impl HttpSolrClient HttpSolrClient$Builder HttpClientUtil)
            (org.apache.solr.client.solrj.embedded EmbeddedSolrServer)
-           (org.apache.solr.client.solrj.response QueryResponse FacetField PivotField RangeFacet RangeFacet$Count RangeFacet$Date)
+           (org.apache.solr.client.solrj.response QueryResponse
+                                                  FacetField PivotField
+                                                  RangeFacet RangeFacet$Count RangeFacet$Date
+                                                  SpellCheckResponse SpellCheckResponse$Suggestion)
            (org.apache.solr.client.solrj.response SuggesterResponse Suggestion)
            (org.apache.solr.common SolrInputDocument SolrDocumentList)
            (org.apache.solr.common.params ModifiableSolrParams CursorMarkParams MoreLikeThisParams)
@@ -711,45 +714,72 @@
 (defn wrap-spellcheck
   "Request spellcheck.  Return corrections as a map containing the Solr :collated-result and :alternatives
    in result metadata. Injects :spell true into parameters (use this middleware sparingly)."
-  [handler]
-  (fn [^SolrQuery query flags]
-    (let [result (handler query (assoc flags :spellcheck true))
-          query-results (:query-results-obj (meta result))]
-      (if query-results
-        (let [scr (.getSpellCheckResponse query-results)]
-          (if scr
-            (vary-meta result assoc
-                       :spellcheck 
-                       {:collated-result (.getCollatedResult scr)
-                        :alternatives (mapcat #(.getAlternatives %) (.getSuggestions scr))})
-            result))
-        result))))
+  [handler & [opts]]
+  (let [spellcheck-opts (into {:spellcheck true}
+                              (for [[k v] opts :when (re-matches #"spellcheck\..+" (name k))] [k v]))]
+    (fn [^SolrQuery query flags]
+      (let [result (handler query (merge flags spellcheck-opts))
+            query-results (:query-results-obj (meta result))]
+        (if query-results
+          (let [^SpellCheckResponse scr (.getSpellCheckResponse query-results)]
+            (if scr
+              (vary-meta result assoc
+                         :spellcheck 
+                         {:collated-result (.getCollatedResult scr)
+                          :is-correctly-spelled? (.isCorrectlySpelled scr)
+                          :alternatives (into {}
+                                              (doall
+                                               (for [^SpellCheckResponse$Suggestion suggestion (.getSuggestions scr)]
+                                                 [(.getToken suggestion)
+                                                  {:num-found (.getNumFound suggestion)
+                                                   :original-frequency (.getOriginalFrequency suggestion)
+                                                   :start-offset (.getStartOffset suggestion)
+                                                   :end-offset (.getEndOffset suggestion)
+                                                   :alternatives (.getAlternatives suggestion)
+                                                   :alternative-frequencies (.getAlternativeFrequencies suggestion)}])))})
+              result))
+          result)))))
 
 (defn wrap-suggest
   "Request suggestions from search.  Return suggestions as an ordered sequence of maps
    containing :term and :weight, in result metadata.
    Injects :suggest true into parameters (use this middleware sparingly).
    If suggest.q is not provided, injects q as suggest.q with leading and trailing * removed."
-  [handler]
+  [handler & {:keys [suggester-name all-suggesters]}]
   (fn [^SolrQuery query flags]
     (let [result (handler query (merge flags
                                        {:suggest true}
+                                       (if (not-empty suggester-name)
+                                         {:suggest.dictionary suggester-name})
                                        (if (not (:suggest.q flags))
                                          {:suggest.q (-> (.getQuery query)
                                                          (str/replace #"^\*" "")
                                                          (str/replace #"\*$" ""))})))
           query-results (:query-results-obj (meta result))
-          suggester-response (when query-results (.getSuggesterResponse query-results))]
+          ^SuggesterResponse suggester-response (when query-results (.getSuggesterResponse query-results))
+          ^Map suggestions (.getSuggestions suggester-response)
+          effective-suggester-name (cond (not-empty suggester-name)
+                                         suggester-name
+                                         :else (first (keys suggestions)))]
       (if (and query-results suggester-response)
         (vary-meta result assoc
                    :suggestions
-                   (reverse
-                    (sort-by :weight
-                             (map (fn [^Suggestion suggestion]
-                                    {:term (.getTerm suggestion)
-                                     :weight (.getWeight suggestion)})
-                                  (get ^Map (.getSuggestions ^SuggesterResponse suggester-response)
-                                       "suggest")))))
+                   (if (or all-suggesters
+                           (and suggester-name (not (string? suggester-name))))
+                     (into {}
+                           (for [suggester-name (keys suggestions)]
+                             [suggester-name (reverse
+                                              (sort-by :weight
+                                                       (map (fn [^Suggestion suggestion]
+                                                              {:term (.getTerm suggestion)
+                                                               :weight (.getWeight suggestion)})
+                                                            (get suggestions suggester-name))))]))
+                     (reverse
+                      (sort-by :weight
+                               (map (fn [^Suggestion suggestion]
+                                      {:term (.getTerm suggestion)
+                                       :weight (.getWeight suggestion)})
+                                    (get suggestions effective-suggester-name))))))
         result))))
 
 (def solr-app

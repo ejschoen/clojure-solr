@@ -456,24 +456,32 @@
 (deftest test-spellchecker
   (doseq [i (range 10)]
     (add-document! {:id i :type "Web Page"
-                    :fulltext "When choosing a field to query for this spell checker, you want one which has relatively little analysis performed on it (particularly analysis such as stemming). Note that you need to specify a field to use for the suggestions, so like the IndexBasedSpellChecker, you may want to copy data from fields like title, body, etc., to a field dedicated to providing spelling suggestions.
-
-Many of the parameters relate to how this spell checker should query the index for term suggestions. The distanceMeasure defines the metric to use during the spell check query. The value \"internal\" uses the default Levenshtein metric, which is the same metric used with the other spell checker implementations.
-
-Because this spell checker is querying the main index, you may want to limit how often it queries the index to be sure to avoid any performance conflicts with user queries. The accuracy setting defines the threshold for a valid suggestion, while maxEdits defines the number of changes to the term to allow. Since most spelling mistakes are only 1 letter off, setting this to 1 will reduce the number of possible suggestions (the default, however, is 2); the value can only be 1 or 2. minPrefix defines the minimum number of characters the terms should share. Setting this to 1 means that the spelling suggestions will all start with the same letter, for example.
-
-The maxInspections parameter defines the maximum number of possible matches to review before returning results; the default is 5. minQueryLength defines how many characters must be in the query before suggestions are provided; the default is 4.
-
-At first, spellchecker analyses incoming query words by looking up them in the index. Only query words, which are absent in index or too rare ones (below maxQueryFrequency ) are considered as misspelled and used for finding suggestions. Words which are frequent than maxQueryFrequency bypass spellchecker unchanged. After suggestions for every misspelled word are found they are filtered for enough frequency with thresholdTokenFrequency as boundary value. These parameters (maxQueryFrequency and thresholdTokenFrequency) can be a percentage (such as .01, or 1%) or an absolute value (such as 4)."}))
+                    :fulltext "Many of the parameters relate to how this spell checker should query the index for term suggestions. The distanceMeasure defines the metric to use during the spell check query. The value \"internal\" uses the default Levenshtein metric, which is the same metric used with the other spell checker implementations."}))
   (commit!)
   (let [result (search* "Leven" {:df "fulltext" :request-handler "/suggest"} (wrap-suggest solr-app))
         suggestion (:term (first (:suggestions (meta result))))]
     (println (format "Best suggestion for \"Leven\": %s" suggestion))
     (is (= suggestion "Levenshtein")))
+
+
+  (let [result (search* "Leven"
+                        {:df "fulltext" :request-handler "/suggest"
+                         :suggest.buildAll true
+                         }
+                        (-> solr-app
+                            (wrap-suggest :suggester-name ["suggest" "context_suggest"])))
+        suggestions (:suggestions (meta result))]
+    (clojure.pprint/pprint suggestions))
+
   (let [result (search* "Levenstein" {:df "fulltext" :request-handler "/spell"} (wrap-spellcheck solr-app))
         spellcheck (:spellcheck (meta result))]
     (println (format "Corrected Levenstein to %s" (:collated-result spellcheck)))
-    (is (= {:collated-result "Levenshtein" :alternatives '("Levenshtein")} spellcheck)))
+    (is (= {:collated-result "Levenshtein" 
+            :is-correctly-spelled? false
+            :alternatives {"Levenstein" {:num-found 1 :original-frequency 0 :start-offset 0 :end-offset 10
+                                         :alternatives ["Levenshtein"]
+                                         :alternative-frequencies [10]}}}
+           spellcheck)))
   (let [result (search* "Levenshte*" {:df "fulltext" :request-handler "/select-with-spell-and-suggest"}
                         (-> solr-app wrap-spellcheck wrap-suggest))
         suggestions (:suggestions (meta result))
@@ -511,6 +519,73 @@ At first, spellchecker analyses incoming query words by looking up them in the i
     (is (empty? result))
     (is (= {:collated-result "Equinor" :alternatives '("Equinor")} spellcheck)))
   ))
+
+(deftest test-suggester
+  (let [tags_1 ["drilling operation"
+                "drilling fluids and materials"
+                "drilling fluid chemistry"
+                "drilling fluid property"
+                "drilling fluid formulation"
+                "drilling fluid selection and formulation"
+                "drilling equipment"
+                "drilling fluid management & disposal"]
+        tags_2 ["drillstem testing"
+                "drillstem/well testing"]]
+    (doseq [i (range 10)]
+      (add-document! {:suggestion tags_1
+                      :client "drilling"
+                      :type "PDF"
+                      :id (str "doc" i)}))
+    (doseq [i (range 10 20)]
+      (add-document! {:suggestion tags_2
+                      :client "testing"
+                      :type "PDF"
+                      :id (str "doc" i)}))
+    (commit!)
+    (let [result (search* "dril"
+                          {:df "fulltext" :request-handler "/suggest"
+                           :suggest.cfq "drilling"
+                           :suggest.build true}
+                          (-> solr-app
+                              (wrap-suggest :suggester-name "context_suggest_mv")))
+          suggestions (map :term (:suggestions (meta result)))]
+      (is (= suggestions (map :term '({:term "drilling equipment", :weight 0}
+                                      {:term "drilling fluid chemistry", :weight 0}
+                                      {:term "drilling fluid formulation", :weight 0}
+                                      {:term "drilling fluid management & disposal", :weight 0}
+                                      {:term "drilling fluid property", :weight 0}
+                                      {:term "drilling fluid selection and formulation", :weight 0}
+                                      {:term "drilling fluids and materials", :weight 0}
+                                      {:term "drilling operation", :weight 0}))))
+      #_(clojure.pprint/pprint (meta result)))
+    (let [result (search* "dril"
+                          {:df "fulltext" :request-handler "/suggest"
+                           :suggest.cfq "testing"
+                           :suggest.build true}
+                          (-> solr-app
+                              (wrap-suggest :suggester-name "context_suggest_mv")))
+          suggestions (map :term (:suggestions (meta result)))]
+      (is (= suggestions (map :term '({:term "drillstem testing", :weight 0}
+                                      {:term "drillstem/well testing", :weight 0}))))
+      #_(clojure.pprint/pprint (meta result)))
+    (let [result (search* "dril"
+                          {:df "fulltext" :request-handler "/suggest"
+                           :suggest.cfg "testing OR drilling"
+                           :suggest.build true}
+                          (-> solr-app
+                              (wrap-suggest :suggester-name "context_suggest_mv")))
+          suggestions (map :term (:suggestions (meta result)))]
+      (is (= suggestions (map :term '({:term "drilling equipment", :weight 0}
+                                      {:term "drilling fluid chemistry", :weight 0}
+                                      {:term "drilling fluid formulation", :weight 0}
+                                      {:term "drilling fluid management & disposal", :weight 0}
+                                      {:term "drilling fluid property", :weight 0}
+                                      {:term "drilling fluid selection and formulation", :weight 0}
+                                      {:term "drilling fluids and materials", :weight 0}
+                                      {:term "drilling operation", :weight 0}
+                                      {:term "drillstem testing", :weight 0}
+                                      {:term "drillstem/well testing", :weight 0}))))
+      #_(clojure.pprint/pprint (meta result)))))
 
 
   

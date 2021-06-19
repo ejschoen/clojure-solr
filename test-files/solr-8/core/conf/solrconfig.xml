@@ -339,12 +339,30 @@
        <str name="name">suggest</str>
        <str name="classname">org.apache.solr.spelling.suggest.Suggester</str>
        <str name="lookupImpl">org.apache.solr.spelling.suggest.fst.AnalyzingLookupFactory</str>
-       <str name="suggestAnalyzerFieldType">string</str>
-       <str name="storeDir">dict_ac</str>
-       <str name="fieldType">string</str>
+       <str name="suggestAnalyzerFieldType">text_ws</str>
        <str name="field">word</str>
+       <str name="buildOnCommit">true</str>
+     </lst>
+     <lst name="suggester">
+       <str name="name">context_suggest</str>
+       <str name="classname">org.apache.solr.spelling.suggest.Suggester</str>
+       <str name="lookupImpl">org.apache.solr.spelling.suggest.fst.AnalyzingInfixLookupFactory</str>
+       <str name="suggestAnalyzerFieldType">text_ws</str>
+       <bool name="highlight">false</bool>
+       <str name="field">word</str>
+       <str name="buildOnCommit">true</str>
+     </lst>
+     <lst name="suggester">
+       <str name="name">context_suggest_mv</str>
+       <str name="classname">org.apache.solr.spelling.suggest.Suggester</str>
+       <str name="lookupImpl">org.apache.solr.spelling.suggest.fst.BlendedInfixLookupFactory</str>
+       <str name="dictionaryImpl">DocumentDictionaryFactory</str>
+       <str name="suggestAnalyzerFieldType">text_ws</str>
+       <bool name="highlight">false</bool>
+       <str name="field">suggestion</str>
        <float name="threshold">0.0</float>
        <str name="buildOnCommit">true</str>
+       <str name="contextField">client</str>
      </lst>
    </searchComponent>
 
@@ -360,6 +378,22 @@
      </arr>
    </requestHandler>
 
+   <requestHandler name="/select-with-spell-and-suggest" class="org.apache.solr.handler.component.SearchHandler">
+     <lst name="defaults">
+       <str name="spellcheck.dictionary">default</str>
+       <str name="spellcheck.collate">true</str>
+       <str name="spellcheck.extendedResults">true</str>
+       <float name="accuracy">0.5</float>
+       <str name="spellcheck">true</str>
+       <str name="suggest">true</str>
+       <str name="suggest.dictionary">suggest</str>
+       <str name="suggest.count">10</str>
+     </lst>
+     <arr name="last-components">
+       <str>spellcheck</str>
+       <str>suggest</str>
+     </arr>
+   </requestHandler>
 
 
    <requestHandler name="/mlt" class="solr.MoreLikeThisHandler">

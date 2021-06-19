@@ -279,6 +279,8 @@
    <field name="provenance" type="string" indexed="true" stored="true" omitNorms="true" />
    <field name="type" type="string" indexed="true" stored="true" required="true" multiValued="false" omitNorms="true" />
    <field name="terms" type="path_string" indexed="true" stored="true" multiValued="true" omitNorms="true" />
+  <field name="suggestion" type="string" indexed="true" stored="true" multiValued="true"/>
+  <field name="client" type="string" indexed="true" stored="true"/>
 
    <!-- Dynamic field definitions.  If a field name is not found, dynamicFields
         will be used if the name matches any of the patterns.
