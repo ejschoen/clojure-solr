@@ -37,11 +37,13 @@
               :when trait]
           trait)))
 
+(def ^:dynamic *qf* nil)
+
 (defn get-fields-via-luke
   "Use the Luke handler (must be configured in the core's solrconfig) to get actua schema information from the core.
    Returns a map of field names to schema info, where schema info "
   []
-  (let [response (.getResponse (:query-results-obj (meta (solr/search "*:*" :qt "/admin/luke"))))
+  (let [response (.getResponse (:query-results-obj (meta (solr/search "*:*" :qt "/admin/luke" :qf *qf*))))
         fields (.get response "fields")
         key-info (into {}
                        (for [[char desc] (into {} (.get (.get response "info") "key"))]

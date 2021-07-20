@@ -1,10 +1,11 @@
-(defproject cc.artifice/clojure-solr "4.0.0"
+(defproject cc.artifice/clojure-solr "4.1.0"
   :dependencies [;;[org.clojure/clojure "1.8.0"]
                  ;;[org.apache.solr/solr-solrj "6.6.6"]
                  ;;[org.apache.solr/solr-core "6.6.6" :exclusions [commons-fileupload joda-time]]
                  [commons-io "2.6"]
                  [commons-fileupload "1.4" :exclusions [commons-io]]
                  [clj-time "0.11.0" :exclusions [org.clojure/clojure]]]
+  :plugins [[lein-pprint "1.3.2"]]
   :classifiers [["solr8" :solr8]
                 ["solr7" :solr7]
                 ["solr6" :solr6]]

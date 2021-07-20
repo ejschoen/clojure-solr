@@ -15,7 +15,8 @@
            (org.apache.http.impl.client BasicCredentialsProvider HttpClientBuilder CloseableHttpClient)
            (org.apache.http.protocol HttpContext HttpCoreContext)
            (org.apache.solr.client.solrj SolrQuery SolrRequest$METHOD SolrClient)
-           (org.apache.solr.client.solrj.impl HttpSolrClient HttpSolrClient$Builder HttpClientUtil)
+           (org.apache.solr.client.solrj.impl HttpSolrClient HttpSolrClient$Builder HttpClientUtil
+                                              ConcurrentUpdateSolrClient ConcurrentUpdateSolrClient$Builder)
            (java.util.jar Manifest)
            (org.apache.solr.client.solrj.embedded EmbeddedSolrServer)
            (org.apache.solr.client.solrj.response QueryResponse
@@ -136,6 +137,41 @@
             (set-credentials uri name password)))
         details))))
 
+(defmulti make-solr-client (fn [url http-client solr-major-version solr-client-options] (:type solr-client-options)))
+
+(defmethod make-solr-client :default [url http-client solr-major-version solr-client-options]
+  (.build
+   (doto (HttpSolrClient$Builder. url)
+     (.withHttpClient http-client)
+     (cond-> (#{true false} (:allow-compression solr-client-options))
+       (.allowCompression (:allow-compression solr-client-options)))
+     (cond-> (not-empty (:kerberos-delegation-token solr-client-options))
+       (.withKerberosDelegationToken (:kerberos-delegation-token solr-client-options)))
+     (cond-> (and (:socket-timeout solr-client-options)
+                  (>= solr-major-version 7))
+       (.withSocketTimeout (:socket-timeout solr-client-options)))
+     (cond-> (and (:connection-timeout solr-client-options)
+                  (>= solr-major-version 7))
+       (.withConnectionTimeout (:connection-timeout solr-client-options))))))
+
+(defmethod  make-solr-client ConcurrentUpdateSolrClient [url http-client solr-major-version solr-client-options]
+  (.build
+   (doto (ConcurrentUpdateSolrClient$Builder. url)
+     (.withHttpClient http-client)
+     (cond-> (and (:queue-size solr-client-options)
+                  (>= solr-major-version 7))
+       (.withQueueSize (:queue-size solr-client-options)))
+     (cond-> (and (:thread-count solr-client-options)
+                  (>= solr-major-version 7))
+       (.withThreadCount (:thread-count solr-client-options)))
+     (cond-> (and (:socket-timeout solr-client-options)
+                  (>= solr-major-version 7))
+       (.withSocketTimeout (:socket-timeout solr-client-options)))
+     (cond-> (and (:connection-timeout solr-client-options)
+                  (>= solr-major-version 7))
+       (.withConnectionTimeout (:connection-timeout solr-client-options))))))
+
+
 (defn ^HttpSolrClient connect [url & [conn-manager solr-client-options]]
   "Create an HttpSolrClient connection to a Solr URI. Optionally use
    a provided connection-manager, such as PoolingHttpClientConnectionManager,
@@ -169,21 +205,8 @@
                             ;;(println "**** CLOJURE-SOLR: HttpRequestInterceptor here.  Looking for" auth-scope "creds:" creds)
                             (when creds
                               (.update auth-state (BasicScheme.) creds)))))))))
-        client ^CloseableHttpClient (.build builder)
-        solr-builder ^HttpSolrClient$Builder (doto (HttpSolrClient$Builder. clean-url)
-                                               (.withHttpClient client)
-                                               (cond-> (#{true false} (:allow-compression solr-client-options))
-                                                 (.allowCompression (:allow-compression solr-client-options)))
-                                               (cond-> (not-empty (:kerberos-delegation-token solr-client-options))
-                                                 (.withKerberosDelegationToken (:kerberos-delegation-token solr-client-options)))
-                                               (cond-> (and (:socket-timeout solr-client-options)
-                                                            (>= solr-major-version 7))
-                                                 (.withSocketTimeout (:socket-timeout solr-client-options)))
-                                               (cond-> (and (:connection-timeout solr-client-options)
-                                                            (>= solr-major-version 7))
-                                                 (.withConnectionTimeout (:connection-timeout solr-client-options))))]
-    (let [^HttpSolrClient client (.build solr-builder)]
-      client)))
+        client ^CloseableHttpClient (.build builder)]
+    (make-solr-client clean-url client solr-major-version solr-client-options)))
 
 (defn- make-document [boost-map doc]
   (let [^SolrInputDocument sdoc (SolrInputDocument. (make-array String 0))]
@@ -447,6 +470,10 @@
     (.setRequestHandler query request-handler))
   (doseq [[key value] (dissoc flags :just-return-query? :facet-pivot-fields :facet-date-ranges :request-handler)]
     (.setParam query (name key) (make-param value)))
+  #_(when (and (not (:qf flags))
+               (not (:df flags))
+               (>= (get-solr-major-version) 7))
+      (throw (Exception. "Missing qf or df in search params")))
   (if just-return-query?
     (str query)
     (let [method (parse-method method)]

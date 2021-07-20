@@ -255,10 +255,11 @@
   (add-document! sample-doc)
   (add-document! (assoc sample-doc :id 2 :type "docx"))
   (commit!)
-  (let [fields (get-fields-via-luke)]
-    (is (not-empty fields))
-    (is (map? (get fields "fulltext")))
-    (is (set? (get-in fields ["fulltext" :schema])))))
+  (binding [*qf* "fulltext"]
+    (let [fields (get-fields-via-luke)]
+      (is (not-empty fields))
+      (is (map? (get fields "fulltext")))
+      (is (set? (get-in fields ["fulltext" :schema]))))))
 
 (deftest test-edismax-disjunction
   (add-document! (assoc sample-doc :id 1 :fulltext "This is a clinical trial."))
