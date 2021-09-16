@@ -801,7 +801,8 @@
                           :is-correctly-spelled? (.isCorrectlySpelled scr)
                           :alternatives (into {}
                                               (doall
-                                               (for [^SpellCheckResponse$Suggestion suggestion (.getSuggestions scr)]
+                                               (for [^SpellCheckResponse$Suggestion suggestion (.getSuggestions scr)
+                                                     :when suggestion]
                                                  [(.getToken suggestion)
                                                   {:num-found (.getNumFound suggestion)
                                                    :original-frequency (.getOriginalFrequency suggestion)
