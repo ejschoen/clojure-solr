@@ -29,30 +29,13 @@
                (try (clojure.java.io/delete-file f) (catch Exception _)))]
     (func func (clojure.java.io/file fname))))
 
-(defn make-solr-container
-  "This is complicated because we support multiple Solr versions that happen to have conflicting Constructor signatures
-   for CoreContainer, and Clojure-Java interop has issues at compilation time, even though a particular Constructor
-   invocation might never happen for a given Solr version."
-  []
-  (let [solr-version (get-solr-version)
-        major-version (second (re-matches #"(\d+)\..*" solr-version)) 
-        cont-expr (case (Integer/parseInt major-version)
-                    (6 7) `(CoreContainer.)
-                    8 (let [home-dir (get-solr-home-dir)]
-                        `(CoreContainer. (.getPath (java.nio.file.FileSystems/getDefault) ~home-dir (make-array String 0))
-                                         (doto (java.util.Properties.)
-                                           (.setProperty "solr.dist.dir"
-                                                         (str (System/getProperty "user.dir")
-                                                              "/test-files/dist"))))))]
-    (eval cont-expr)))
-
 (defn solr-server-fixture
   [f]
   (let [home-dir (get-solr-home-dir)]
     (delete-recursively (str home-dir "/data"))
     (System/setProperty "solr.solr.home" home-dir)
     (System/setProperty "solr.dist.dir" (str (System/getProperty "user.dir")
-                                           "/test-files/dist"))
+                                             "/test-files/dist"))
     (let [[_ major minor :as version] (re-matches #"(\d+)\.(\d+)\..*" (get-solr-version))
           major (Integer/parseInt major)
           minor (Integer/parseInt minor)]
@@ -61,12 +44,12 @@
         ;; https://issues.apache.org/jira/browse/SOLR-12858
         (println "Using get as default method due to issue SOLR-12858")
         (set-default-method! :get)
-      ))
-    (let [cont (make-solr-container)]
-      (.load cont)
-      (binding [*connection* (EmbeddedSolrServer. cont "clojure-solr")]
-        (f)
-        (.close *connection*)))))
+        ))
+    (with-connection (connect nil nil 
+                              {:type EmbeddedSolrServer
+                               :core "clojure-solr"
+                               :home-dir (get-solr-home-dir)}) 
+      (f))))
 
 (use-fixtures :each solr-server-fixture)
 
@@ -597,3 +580,22 @@
 
 
   
+(deftest test-id-number-search
+  (add-document! {:id "doc0"
+                  :type "LAS File"
+                  :pagetext ["UWI . 12-345-67890  : UWI or API of well"
+                             "API . 0987654321    : API 10"
+                             "API . 314159265358  : API 12"
+                             "API . 27-182-818284590 : API 14 "]})
+  
+  (commit!)
+  (are [match-count query] (= match-count (count (search* query {:df "pagetext"})))
+    1 "1234567890"        ;; Finds text with embedded dashes
+    0 "09-876-54321"      ;; Fails to find text without embedded dashes if we search w/ dashes.
+    1 "0987654321"        ;; Matches literal text.
+    1 "27182818284590"
+    1 "27182818284*"      ;; Wildcards work inside tokens.
+    1 "12-345-67890"      ;; Matches dashed text if we search with dashed text.
+    )
+  (is (= 1  (count (search* "1234567890" {:df "pagetext"})) ))
+  )
