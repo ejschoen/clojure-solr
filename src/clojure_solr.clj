@@ -27,6 +27,7 @@
            (org.apache.solr.common SolrInputDocument SolrDocumentList)
            (org.apache.solr.common.params ModifiableSolrParams CursorMarkParams MoreLikeThisParams)
            (org.apache.solr.common.util NamedList)
+           (org.apache.solr.core CoreContainer)
            (org.apache.solr.util DateMathParser)))
 
 (defonce ^:private url-details (atom {}))
@@ -119,23 +120,25 @@
 (defn get-url-details
   [url]
   (let [details (get @url-details url)]
-    (if details
-      details
-      (let [[_ scheme name password rest] (re-matches #"(https?)://(.+):(.+)@(.*)" url)
-            details (if (and scheme name password rest)
-                      {:clean-url (str scheme "://" rest)
-                       :password password
-                       :name name}
-                      {:clean-url url})
-            uri (URI. (:clean-url details))]
-        (swap! url-details assoc url details)
-        (when (and name password)
-          (let [host (if (= (.getPort uri) -1)
-                       (str (.getScheme uri) "://" (.getHost uri))
-                       (str (.getScheme uri) "://" (.getHost uri) ":" (.getPort uri)))]
-            ;;(println "**** CLOJURE-SOLR: Adding credentials for host" host)
-            (set-credentials uri name password)))
-        details))))
+    (cond details
+          details
+          url
+          (let [[_ scheme name password rest] (re-matches #"(https?)://(.+):(.+)@(.*)" url)
+                details (if (and scheme name password rest)
+                          {:clean-url (str scheme "://" rest)
+                           :password password
+                           :name name}
+                          {:clean-url url})
+                uri (URI. (:clean-url details))]
+            (swap! url-details assoc url details)
+            (when (and name password)
+              (let [host (if (= (.getPort uri) -1)
+                           (str (.getScheme uri) "://" (.getHost uri))
+                           (str (.getScheme uri) "://" (.getHost uri) ":" (.getPort uri)))]
+                ;;(println "**** CLOJURE-SOLR: Adding credentials for host" host)
+                (set-credentials uri name password)))
+            details)
+          :else nil)))
 
 (defmulti make-solr-client (fn [url http-client solr-major-version solr-client-options] (:type solr-client-options)))
 
@@ -171,6 +174,20 @@
                   (>= solr-major-version 7))
        (.withConnectionTimeout (:connection-timeout solr-client-options))))))
 
+(defmethod make-solr-client EmbeddedSolrServer [_  _ major-version solr-client-options]
+  (let [cont-expr (case major-version
+                    (6 7) `(CoreContainer.)
+                    8 (let [home-dir (:home-dir solr-client-options)]
+                        `(CoreContainer. (.getPath (java.nio.file.FileSystems/getDefault)
+                                                   ~home-dir
+                                                   (make-array String 0))
+                                         (doto (java.util.Properties.)
+                                           (.setProperty "solr.dist.dir"
+                                                         (str (System/getProperty "user.dir")
+                                                              "/test-files/dist"))))))
+        ^CoreContainer container (doto (eval cont-expr) (.load))]
+    (EmbeddedSolrServer. container (:core solr-client-options))
+    ))  
 
 (defn ^HttpSolrClient connect [url & [conn-manager solr-client-options]]
   "Create an HttpSolrClient connection to a Solr URI. Optionally use
@@ -183,29 +200,32 @@
      :socket-timeout int in millis
      :connection-timeout int in millis"
   (let [solr-major-version (get-solr-major-version)
-        {:keys [clean-url name password]} (get-url-details url)
-        builder (doto ^HttpClientBuilder (HttpClientBuilder/create)
-                  (.setDefaultCredentialsProvider credentials-provider)
-                  (cond-> conn-manager (.setConnectionManager conn-manager))
-                  (cond-> (and (:socket-timeout solr-client-options)
-                               (< solr-major-version 7))
-                    (.setDefaultSocketConfig (let [scbuilder (doto ^SocketConfig$Builder (SocketConfig/custom)
-                                                               (.setSoTimeout (int (:socket-timeout solr-client-options))))]
-                                               (.build scbuilder))))
-                                             
-                  (.addInterceptorFirst 
-                   (reify 
-                     HttpRequestInterceptor
-                     (^void process [this ^HttpRequest request ^HttpContext context]
-                      (let [auth-state (.getAttribute context HttpClientContext/TARGET_AUTH_STATE)]
-                        (when (nil? (.getAuthScheme auth-state))
-                          (let [target-host (.getAttribute context HttpCoreContext/HTTP_TARGET_HOST)
-                                auth-scope (make-auth-scope (.getHostName target-host) (.getPort target-host))
-                                creds (.getCredentials credentials-provider auth-scope)]
-                            ;;(println "**** CLOJURE-SOLR: HttpRequestInterceptor here.  Looking for" auth-scope "creds:" creds)
-                            (when creds
-                              (.update auth-state (BasicScheme.) creds)))))))))
-        client ^CloseableHttpClient (.build builder)]
+        {:keys [clean-url name password] :as details} (get-url-details url)
+        ^HttpClientBuilder builder (when details
+                                     (doto ^HttpClientBuilder (HttpClientBuilder/create)
+                                       (.setDefaultCredentialsProvider credentials-provider)
+                                       (cond-> conn-manager (.setConnectionManager conn-manager))
+                                       (cond-> (and (:socket-timeout solr-client-options)
+                                                    (< solr-major-version 7))
+                                         (.setDefaultSocketConfig (let [scbuilder
+                                                                        (doto ^SocketConfig$Builder (SocketConfig/custom)
+                                                                          (.setSoTimeout
+                                                                           (int (:socket-timeout
+                                                                                 solr-client-options))))]
+                                                                    (.build scbuilder))))
+                                       
+                                       (.addInterceptorFirst 
+                                        (reify 
+                                          HttpRequestInterceptor
+                                          (^void process [this ^HttpRequest request ^HttpContext context]
+                                           (let [auth-state (.getAttribute context HttpClientContext/TARGET_AUTH_STATE)]
+                                             (when (nil? (.getAuthScheme auth-state))
+                                               (let [target-host (.getAttribute context HttpCoreContext/HTTP_TARGET_HOST)
+                                                     auth-scope (make-auth-scope (.getHostName target-host) (.getPort target-host))
+                                                     creds (.getCredentials credentials-provider auth-scope)]
+                                                 (when creds
+                                                   (.update auth-state (BasicScheme.) creds))))))))))
+        ^CloseableHttpClient client (when builder (.build builder))]
     (make-solr-client clean-url client solr-major-version solr-client-options)))
 
 (defn- make-document [boost-map doc]
