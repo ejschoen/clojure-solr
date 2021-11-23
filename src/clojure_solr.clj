@@ -18,7 +18,7 @@
            (org.apache.solr.client.solrj.impl HttpSolrClient HttpSolrClient$Builder HttpClientUtil
                                               ConcurrentUpdateSolrClient ConcurrentUpdateSolrClient$Builder)
            (java.util.jar Manifest)
-           (org.apache.solr.client.solrj.embedded EmbeddedSolrServer)
+           (java.time.temporal ChronoUnit)
            (org.apache.solr.client.solrj.response QueryResponse
                                                   FacetField PivotField
                                                   RangeFacet RangeFacet$Count RangeFacet$Date
@@ -27,8 +27,7 @@
            (org.apache.solr.common SolrInputDocument SolrDocumentList)
            (org.apache.solr.common.params ModifiableSolrParams CursorMarkParams MoreLikeThisParams)
            (org.apache.solr.common.util NamedList)
-           (org.apache.solr.core CoreContainer)
-           (org.apache.solr.util DateMathParser)))
+           #_(org.apache.solr.util DateMathParser)))
 
 (defonce ^:private url-details (atom {}))
 (defonce ^{:private true :tag BasicCredentialsProvider}  credentials-provider (BasicCredentialsProvider.))
@@ -44,10 +43,77 @@
 (def http-methods {:get SolrRequest$METHOD/GET, :GET SolrRequest$METHOD/GET
                    :post SolrRequest$METHOD/POST, :POST SolrRequest$METHOD/POST})
 
+(def calendar-units
+  {"DATE" (ChronoUnit/DAYS),
+   "DAY" (ChronoUnit/DAYS),
+   "DAYS" (ChronoUnit/DAYS),
+   "HOUR" (ChronoUnit/HOURS),
+   "HOURS" (ChronoUnit/HOURS),
+   "MILLI" (ChronoUnit/MILLIS),
+   "MILLIS" (ChronoUnit/MILLIS),
+   "MILLISECOND" (ChronoUnit/MILLIS),
+   "MILLISECONDS" (ChronoUnit/MILLIS),
+   "MINUTE" (ChronoUnit/MINUTES),
+   "MINUTES" (ChronoUnit/MINUTES),
+   "MONTH" (ChronoUnit/MONTHS),
+   "MONTHS" (ChronoUnit/MONTHS),
+   "SECOND" (ChronoUnit/SECONDS),
+   "SECONDS" (ChronoUnit/SECONDS),
+   "YEAR" (ChronoUnit/YEARS),
+   "YEARS" (ChronoUnit/YEARS)})
+
+(def time-floor-fns
+  {(ChronoUnit/YEARS) t/year
+   (ChronoUnit/MONTHS) t/month
+   (ChronoUnit/DAYS) t/day
+   (ChronoUnit/HOURS) t/hour
+   (ChronoUnit/MINUTES) t/minute
+   (ChronoUnit/SECONDS) t/second
+   (ChronoUnit/MILLIS) t/milli})
+
+(def time-offset-fns
+  {(ChronoUnit/YEARS) t/years
+   (ChronoUnit/MONTHS) t/months
+   (ChronoUnit/DAYS) t/days
+   (ChronoUnit/HOURS) t/hours
+   (ChronoUnit/MINUTES) t/minutes
+   (ChronoUnit/SECONDS) t/seconds
+   (ChronoUnit/MILLIS) t/millis}) 
+
+
+(def date-math-regex
+  (let [unit-alternation (str/join "|" (reverse (sort-by count (keys calendar-units)) ))]
+    (re-pattern (format "((/(?:%s))|([+\\-]\\d+(?:%s)))" unit-alternation unit-alternation))))
+                
+(defn cheap-date-math-parser
+  [now expr]
+  (let [matcher (re-matcher date-math-regex expr)
+        operands (loop [operands []]
+                   (if (re-find matcher)
+                     (recur (conj operands (second (re-groups matcher))))
+                     operands))
+        reconstructed-expr (str/join operands)]
+    (if (= reconstructed-expr expr)
+      (reduce (fn [time operand]
+                (if (.startsWith operand "/")
+                  (let [unit (subs operand 1)
+                        chrono-unit (get calendar-units unit)
+                        floor-fn (get time-floor-fns chrono-unit)]
+                    (t/floor time floor-fn))
+                  (let [[_ factor-string unit] (re-matches #"((?:\+|-)\d+)([A-Z]+)" operand)
+                        factor (Integer/parseInt factor-string)
+                        offset-unit (get calendar-units unit)
+                        offset-fn (get time-offset-fns offset-unit)]
+                    (t/plus time (offset-fn factor)))))
+              now
+              operands)
+      (throw (ex-info (format "Invalid DateMath expression: %s" expr)
+                      {:given expr :parsed operands})))))  
+
 (defn get-solr-version
   []
-  (let [name (format "%s.class" (.getSimpleName EmbeddedSolrServer))
-        resource (str (.getResource EmbeddedSolrServer name))]
+  (let [name (format "%s.class" (.getSimpleName SolrQuery))
+        resource (str (.getResource SolrQuery name))]
     (if (re-matches #"jar:.+" resource)
       (let [manifest-name (str (subs resource 0 (inc (.lastIndexOf resource "!"))) "/META-INF/MANIFEST.MF")]
         (with-open [s (.openStream (java.net.URL. manifest-name))]
@@ -173,21 +239,6 @@
      (cond-> (and (:connection-timeout solr-client-options)
                   (>= solr-major-version 7))
        (.withConnectionTimeout (:connection-timeout solr-client-options))))))
-
-(defmethod make-solr-client EmbeddedSolrServer [_  _ major-version solr-client-options]
-  (let [cont-expr (case major-version
-                    (6 7) `(CoreContainer.)
-                    8 (let [home-dir (:home-dir solr-client-options)]
-                        `(CoreContainer. (.getPath (java.nio.file.FileSystems/getDefault)
-                                                   ~home-dir
-                                                   (make-array String 0))
-                                         (doto (java.util.Properties.)
-                                           (.setProperty "solr.dist.dir"
-                                                         (str (System/getProperty "user.dir")
-                                                              "/test-files/dist"))))))
-        ^CoreContainer container (doto (eval cont-expr) (.load))]
-    (EmbeddedSolrServer. container (:core solr-client-options))
-    ))  
 
 (defn ^HttpSolrClient connect [url & [conn-manager solr-client-options]]
   "Create an HttpSolrClient connection to a Solr URI. Optionally use
@@ -376,7 +427,9 @@
                                (let [start-val (parse-range-value (.getValue val) (.getStart r))
                                      start-str (format-range-value start-val nil false)
                                      end-val (cond date-range?
-                                                   (.parseMath (doto (DateMathParser.)
+                                                   (tcoerce/to-date
+                                                    (cheap-date-math-parser (tcoerce/from-date start-val) gap))
+                                                   #_(.parseMath (doto (DateMathParser.)
                                                                  (.setNow
                                                                   start-val #_(tcoerce/to-date
                                                                                (tformat/parse query-result-date-time-parser start-val))))

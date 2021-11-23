@@ -5,8 +5,7 @@
            (org.apache.solr.client.solrj.response.schema SchemaResponse$FieldsResponse SchemaResponse$DynamicFieldsResponse)
            (org.apache.solr.common SolrInputDocument)
            (org.apache.solr.client.solrj SolrQuery SolrRequest$METHOD)
-           (org.apache.solr.common.params ModifiableSolrParams)
-           (org.apache.solr.util DateMathParser))
+           (org.apache.solr.common.params ModifiableSolrParams))
   (:require [clojure-solr :as solr]))
 
 

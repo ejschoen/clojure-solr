@@ -15,6 +15,22 @@
   (:import [java.nio.charset StandardCharsets]
            [org.apache.commons.codec.binary Base64]))
 
+(defmethod make-solr-client EmbeddedSolrServer [_  _ major-version solr-client-options]
+  (let [cont-expr (case major-version
+                    (6 7) `(CoreContainer.)
+                    8 (let [home-dir (:home-dir solr-client-options)]
+                        `(CoreContainer. (.getPath (java.nio.file.FileSystems/getDefault)
+                                                   ~home-dir
+                                                   (make-array String 0))
+                                         (doto (java.util.Properties.)
+                                           (.setProperty "solr.dist.dir"
+                                                         (str (System/getProperty "user.dir")
+                                                              "/test-files/dist"))))))
+        ^CoreContainer container (doto (eval cont-expr) (.load))]
+    (EmbeddedSolrServer. container (:core solr-client-options))
+    ))
+
+
 (defn get-solr-home-dir
   []
   (let [version (get-solr-version)]
@@ -599,3 +615,11 @@
     )
   (is (= 1  (count (search* "1234567890" {:df "pagetext"})) ))
   )
+
+(deftest test-cheap-date-math-parser
+  (are [out in] (= out (cheap-date-math-parser in))
+    ["/DAY" "+6MONTHS" "+3DAYS"] "/DAY+6MONTHS+3DAYS"
+    ["+6MONTHS" "+3DAYS" "/DAY"] "+6MONTHS+3DAYS/DAY"
+    ["-1DAY"] "-1DAY"
+    ["+2YEARS"] "+2YEARS"
+    ["/HOUR"] "/HOUR"))
