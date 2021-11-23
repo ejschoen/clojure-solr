@@ -39,37 +39,67 @@ Usage
                                  {"id" "testdoc.3", "name" "a final test"}])
         (commit!)
         (search "test")
-        (search "test" :rows 2))
+        (search "test" :rows 2)
+        (search* "test" {:rows 2 :df "pages"})
 
 - Advanced Usage
  
-  - Parameters can be passed as a map, that contains Solr parameter names as keywords e.g (start, fields, facet-filters, etc..)
+  - Since release 4.0.0, the Clojure wrapper around SolrJ has been refactored to use a middleware architecture, much like Ring.
+    Middleware handlers are responsible for converting parameters to search or search* into SolrJ parameters, or injecting
+    additional parameters into SolrJ queries, and are also responsible for converting search results into entries in the
+    returned sequence of document maps or in the search result metadata.  The default middleware stack handles common
+    use cases: searching with faceting and/or pivoting, optionally with a cursor, highlighting, collapsing and expanding
+    results.
+    
+  - Optional parameters can be passed as a map to search*, that contains Solr parameter names as keywords e.g (start, fields, facet-filters, etc..)
 
   ::
 
       Optional keys, passed in a map:
-      :method :get or :post (default :get)
-      :rows Number of rows to return (default is Solr default: 1000)
-      :start Offset into query result at which to start returning rows (default 0)
-      :fields Fields to return
-      :facet-fields Discrete-valued fields to facet.  Can be a string, keyword, or map containing {:name ... :prefix ...}.
-      :facet-queries Vector of facet queries, each encoded in a string or a map of {:name, :value, :formatter}.  :formatter is optional and defaults to the raw query formatter. The result is in the :facet-queries response.
+      :collapse Name of field to collapse search results upon,
+                or map of {!collapse ...} keys and values
+                (requires wrap-collapse middleware, enabled by default)
+      :cursor-mark true or a previous next-cursor-mark value from a previous search' metadata
+                   (requires wrap-cursor-mark middleware [enabled by default],
+                   and :sort option with a unique field name)
+      :debugQuery true/false enable (default) or disable query debug values from Solr
+                  (requires wrap-debug middleware, enabled by default)
+      :expand Name of field upon which to expand collapsed search results,
+              or map of expand.* parameters
+              (requires wrap-expand middleware, enabled by default)
       :facet-date-ranges Date fields to facet as a vector or maps.  Each map contains
-      :field Field name
-      :tag Optional, for referencing in a pivot facet
-      :start Earliest date (as java.util.Date)
-      :end Latest date (as java.util.Date)
-      :gap Faceting gap, as String, per Solr (+1HOUR, etc)
-      :others  Comma-separated string: before,after,between,none,all.  Optional.
-      :include Comma-separated string: lower,upper,edge,outer,all.  Optional.
-      :hardend Boolean (See Solr doc).  Optional.
-      :missing Boolean--return empty buckets if true.  Optional.
-      :facet-numeric-ranges Numeric fields to facet, as a vector of maps.  Map fields as for date ranges, but start, end and gap must be numbers.
-      :facet-mincount Minimum number of docs in a facet for the bucket to be returned.
-      :facet-hier-sep Useful for path hierarchy token faceting.  A regex, such as \\|.
+          :end Latest date (as java.util.Date)
+          :field Field name
+          :gap Faceting gap, as String, per Solr (+1HOUR, etc)
+          :hardend Boolean (See Solr doc).  Optional.
+          :include Comma-separated string: lower,upper,edge,outer,all.  Optional.
+          :missing Boolean--return empty buckets if true.  Optional.
+          :others  Comma-separated string: before,after,between,none,all.  Optional.
+          :start Earliest date (as java.util.Date)
+          :tag Optional, for referencing in a pivot facet
+        Note: All faceting requires wrap-faceting middleware, enabled by default
+      :facet-fields Discrete-valued fields to facet.  Can be a string, keyword, or map containing {:name ... :prefix ...}.
       :facet-filters Solr filter expression on facet values.  Passed as a map in the form: {:name 'facet-name' :value 'facet-value' :formatter (fn [name value] ...) } where :formatter is optional and is used to format the query.
-      :facet-pivot-fields Vector of pivots to compute, each a list of facet fields. If a facet is tagged (e.g., {:tag ts} in :facet-date-ranges) then the string should be {!range=ts}other-facet.  Otherwise, use comma separated lists: this-facet,other-facet.
-
+      :facet-hier-sep Useful for path hierarchy token faceting.  A regex, such as \\|.
+      :facet-mincount Minimum number of docs in a facet for the bucket to be returned.
+      :facet-numeric-ranges Numeric fields to facet, as a vector of maps.  Map fields as for date ranges, but start, end and gap must be numbers.
+      :facet-pivot-fields Vector of pivots to compute, each a list of facet fields.
+       If a facet is tagged (e.g., {:tag ts} in :facet-date-ranges),
+       then the string should be {!range=ts}other-facet.
+       Otherwise, use comma separated lists: this-facet,other-facet.
+       (requires wrap-pivoting middleware, enabled by default)
+      :facet-queries Vector of facet queries, each encoded in a string or a map of {:name, :value, :formatter}.  :formatter is optional and defaults to the raw query formatter. The result is in the :facet-queries response.
+      :fields Fields to return
+      :method :get or :post (default :get)
+      :request-handler (alternative request handler)
+      :rows Number of rows to return (default is Solr default: 1000)
+      :sort Sort field and direction (e.g., "modified desc")
+      :spellcheck.* Spellcheck options (requires: wrap-spellcheck middleware
+                                                  and handler must configure spellcheck)
+      :start Offset into query result at which to start returning rows (default 0)
+      :suggester-name  Name of suggester dictionary (requires wrap-suggest middleware,
+                       and may need an alternative request handler)
+      :all-suggesters  Return suggestions from all responding suggesters
   ::
   
     (with-connection...

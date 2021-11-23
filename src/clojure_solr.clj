@@ -246,10 +246,21 @@
    for situations where Solr's default connection manager cannot keep up
    with demand.
    solr-client-options is a map with:
-     :allow-compression true/false
+     :type                      type of Solr client to create: HttpSolrClient (default), 
+                                ConcurrentUpdateSolrClient, EmbeddedSolrServer (ie, for testing)
+   for HttpSolrClient:
+     :allow-compression         true/false
      :kerberos-delegation-token string
-     :socket-timeout int in millis
-     :connection-timeout int in millis"
+     :socket-timeout            int in milliseconds
+     :connection-timeout        int in milliseconds
+   for ConcurrentUpdateSolrClient:
+     :queue-size                integer buffer capacity
+     :thread-count              integer background processing thread count
+     :socket-timeout            int in milliseconds
+     :connection-timeout        int in milliseconds
+   for EmbeddedSolrServer:
+     :home-dir                  path to directory containing core files
+     :core                      name of core to create"
   (let [solr-major-version (get-solr-major-version)
         {:keys [clean-url name password] :as details} (get-url-details url)
         ^HttpClientBuilder builder (when details
@@ -559,35 +570,36 @@
 (defn wrap-show-query
   [handler & {:keys [trace-fn] :or {trace-fn *trace-fn*}}]
   (fn [q flags]
-    (binding [*trace-fn* trace-fn]
-      (trace "Solr Query:")
-      (trace q)
-      (trace "  Facet filters:")
-      (if (not-empty (:facet-filters flags))
-        (doseq [ff (:facet-filters flags)]
-          (trace (format "    %s" (pr-str (format-facet-query ff)))))
-        (trace "    none"))
-      (trace "  Facet queries:")
-      (if (not-empty (:facet-queries flags))
-        (doseq [ff (:facet-queries flags)]
-          (trace (format "    %s" (format-facet-query ff))))
-        (trace "    none"))
-      (trace "  Facet fields:")
-      (if (not-empty (:facet-fields flags))
-        (doseq [ff (:facet-fields flags)]
-          (trace (format "    %s" (if (map? ff) (pr-str ff) ff))))
-        (trace "    none"))
-      (trace "  Facet Numeric Ranges")
-      (if (not-empty (:facet-numeric-ranges flags))
-        (doseq [ff (:facet-numeric-ranges flags)]
-          (trace (format "    start: %s gap: %s end: %s" (:start ff) (:gap ff) (:end ff))))
-        (trace "    none"))
-      (let [other (dissoc flags :facet-filters :facet-qieries :facet-fields)]
-        (when (not-empty other)
-          (trace "  Other parameters to Solr:")
-          (doseq [[k v] other]
-            (trace (format "  %s: %s" k (pr-str v)))))))
-      (handler q flags)))
+    (when trace-fn
+      (binding [*trace-fn* trace-fn]
+        (trace "Solr Query:")
+        (trace q)
+        (trace "  Facet filters:")
+        (if (not-empty (:facet-filters flags))
+          (doseq [ff (:facet-filters flags)]
+            (trace (format "    %s" (pr-str (format-facet-query ff)))))
+          (trace "    none"))
+        (trace "  Facet queries:")
+        (if (not-empty (:facet-queries flags))
+          (doseq [ff (:facet-queries flags)]
+            (trace (format "    %s" (format-facet-query ff))))
+          (trace "    none"))
+        (trace "  Facet fields:")
+        (if (not-empty (:facet-fields flags))
+          (doseq [ff (:facet-fields flags)]
+            (trace (format "    %s" (if (map? ff) (pr-str ff) ff))))
+          (trace "    none"))
+        (trace "  Facet Numeric Ranges")
+        (if (not-empty (:facet-numeric-ranges flags))
+          (doseq [ff (:facet-numeric-ranges flags)]
+            (trace (format "    start: %s gap: %s end: %s" (:start ff) (:gap ff) (:end ff))))
+          (trace "    none"))
+        (let [other (dissoc flags :facet-filters :facet-qieries :facet-fields)]
+          (when (not-empty other)
+            (trace "  Other parameters to Solr:")
+            (doseq [[k v] other]
+              (trace (format "  %s: %s" k (pr-str v))))))))
+    (handler q flags)))
 
 (defn wrap-debug
   "Insert query debugging information if :debugQuery is truthy in flags."
