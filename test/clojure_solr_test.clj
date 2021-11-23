@@ -617,9 +617,10 @@
   )
 
 (deftest test-cheap-date-math-parser
-  (are [out in] (= out (cheap-date-math-parser in))
-    ["/DAY" "+6MONTHS" "+3DAYS"] "/DAY+6MONTHS+3DAYS"
-    ["+6MONTHS" "+3DAYS" "/DAY"] "+6MONTHS+3DAYS/DAY"
-    ["-1DAY"] "-1DAY"
-    ["+2YEARS"] "+2YEARS"
-    ["/HOUR"] "/HOUR"))
+  (let [now (t/now)]
+    (are [out in] (= out (cheap-date-math-parser now in))
+      (-> now (t/floor t/day) (t/plus (t/months 6)) (t/plus (t/days 3))) "/DAY+6MONTHS+3DAYS"
+      (-> now (t/plus (t/months 6)) (t/plus (t/days 3)) (t/floor t/day)) "+6MONTHS+3DAYS/DAY"
+      (-> now (t/minus (t/days 1))) "-1DAY"
+      (-> now (t/plus (t/years 2))) "+2YEARS"
+      (-> now (t/floor t/hour)) "/HOUR")))
