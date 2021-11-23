@@ -12,7 +12,7 @@ project.clj file:
 
 ::
 
-    [cc.artifice/clojure-solr "3.0.0"]
+    [cc.artifice/clojure-solr "4.1.3"]
 
 Note: Starting with release 3.0.0, Clojure and Solr dependencies are not part of the basic project definition.
 Use lein with-profile +1.8,+solr7 repl (or test) for example to include Clojure 1.8 and Solr 7.7.3 dependencies.
