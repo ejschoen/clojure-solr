@@ -954,6 +954,8 @@
       wrap-field-statistics))
       
 (defn search*-with-middleware
+  "Searches for documents matching q, which can be a string or an instance of SolrQuery.  See search for details about the flags map.
+   Middleware can be provided explicitly, be sources from the :middleware entry in flags, or default to clojure-solr/solr-app."
   [q flags & [middleware]]
   (let [^SolrQuery query (cond (string? q) (SolrQuery. q)
                                (instance? SolrQuery q) q
@@ -962,8 +964,20 @@
     (middleware query (dissoc flags :middleware))))
 
 (defn search*
+  "Searches for documents matching q, which can be a string or an instance of SolrQuery.  See search for details about the flags map"
   [q flags & [middleware]]
   (search*-with-middleware q flags middleware))
+
+(defn lazy-search*
+  "Generate a lazy sequence of results using Solr's cursormark feature.  
+   flags must include a sort entry whose value is the name of a unique field."
+  [q flags & [middleware]]
+  (lazy-seq 
+   (let [result (search* q (update-in flags [:cursor-mark] (fn [old] (or old true))))]
+     (concat result
+             (if (:cursor-done (meta result))
+               nil
+               (lazy-search* q (assoc flags :cursor-mark (:next-cursor-mark (meta result)))))))))
 
 (defn search
   "Query solr through solrj.

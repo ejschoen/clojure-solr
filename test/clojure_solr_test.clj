@@ -3,7 +3,8 @@
             [clojure.java.io :as io]
             [clojure.string :as str])
   (:import (java.util.jar Manifest))
-  (:import (org.apache.solr.client.solrj.embedded EmbeddedSolrServer))
+  (:import (org.apache.solr.client.solrj.embedded EmbeddedSolrServer)
+           (org.apache.solr.client.solrj SolrQuery SolrRequest$METHOD SolrClient))
   (:import (org.apache.solr.core CoreContainer))
   (:require [clj-time.core :as t])
   (:require [clj-time.coerce :as tcoerce])
@@ -441,6 +442,24 @@
                                        :debugQuery true
                                        :qf "title fulltext"
                                        :defType "edismax"))))
+
+(deftest test-lazy-search*
+  (doseq [i (range 1000)]
+    (add-document! {:id i :type "Web Page"
+                    :fulltext "Many of the parameters relate to how this spell checker should query the index for term suggestions. The distanceMeasure defines the metric to use during the spell check query. The value \"internal\" uses the default Levenshtein metric, which is the same metric used with the other spell checker implementations."}))
+  (commit!)
+  (let [query-counter (atom 0)
+        wrap-counter-middleware (fn [handler]
+                                  (fn [^SolrQuery query flags]
+                                    (swap! query-counter inc)
+                                    (handler query flags)))
+        result (lazy-search* "Levenshtein" {:df "fulltext" :rows 10
+                                            :sort "id ASC"
+                                            :middleware (wrap-counter-middleware solr-app)})]
+    (is (= clojure.lang.LazySeq (type result)))
+    (is (= 1000 (count result)))
+    (is (every? (fn [doc] (= "Web Page" (:type doc))) result))
+    (is (= 101 @query-counter))))
 
 (deftest test-spellchecker
   (doseq [i (range 10)]
