@@ -269,6 +269,14 @@
                                  :num-shards (count (.get collection "shards"))
                                  :num-replicas (apply max (map (fn [[_ shard]] (count (.get shard "replicas"))) (.get collection "shards")))
                                  :shards (str/join "," (keys (.get collection "shards")))
+                                 :cores (for [[shard-name shard] (.get collection "shards")
+                                              [replica-name replica] (.get shard "replicas")]
+                                          {:shard-name shard-name
+                                           :replica-name replica-name
+                                           :core (.get replica "core")
+                                           :base-url (.get replica "base_url")
+                                           :type (.get replica "type")
+                                           :node-name (.get replica "node_name")})
                                  :max-shards-per-node (Integer/parseInt (.get collection "maxShardsPerNode"))
                                  :replication-factor (Integer/parseInt (.get collection "replicationFactor"))
                                  :nrt-replicas (Integer/parseInt (.get collection "nrtReplicas"))
