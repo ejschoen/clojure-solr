@@ -89,7 +89,7 @@
 (defn- is-password-map?
   [m]
   (and (map? m)
-       (or (:cleartext m) (:basic-auth m))
+       (or (:cleartext-password m) (:basic-auth m))
        (:hashed-password m)
        (:salt m)))
 
@@ -99,7 +99,7 @@
    authorization and authentication entries. For the
      {:authentication {:credentials {\"user\" \"password\" ...}}} 
    entries, the password can be nil, a number, a string, or a map 
-   containing the :salt, :hashed-password, and :cleartext entry 
+   containing the :salt, :hashed-password, and :cleartext-password entry 
    or the user:password value as :basic-auth.  
    
      Given a string password or a basic-auth user:password combo, 
