@@ -331,7 +331,7 @@
   (get http-methods method (get http-methods @default-method)))
 
 (defn extract-facets
-  [query-results facet-hier-sep limiting? formatters key-fields]
+  [^QueryResponse query-results facet-hier-sep limiting? formatters key-fields]
   (map (fn [^FacetField f]
          (let [field-name (.getName f)
                facet-name (get key-fields field-name field-name)]
@@ -552,7 +552,7 @@
    {:keys [method request-handler just-return-query?] :as flags}]
   (when (not-empty request-handler)
     (.setRequestHandler query request-handler))
-  (doseq [[key value] (dissoc flags :just-return-query? :facet-pivot-fields :facet-date-ranges :request-handler)]
+  (doseq [[key value] (dissoc flags :just-return-query? :facet-pivot-fields :facet-date-ranges :request-handler :original-flags)]
     (.setParam query (name key) (make-param value)))
   #_(when (and (not (:qf flags))
                (not (:df flags))
@@ -572,33 +572,34 @@
   (fn [q flags]
     (when trace-fn
       (binding [*trace-fn* trace-fn]
-        (trace "Solr Query:")
-        (trace q)
-        (trace "  Facet filters:")
-        (if (not-empty (:facet-filters flags))
-          (doseq [ff (:facet-filters flags)]
-            (trace (format "    %s" (pr-str (format-facet-query ff)))))
-          (trace "    none"))
-        (trace "  Facet queries:")
-        (if (not-empty (:facet-queries flags))
-          (doseq [ff (:facet-queries flags)]
-            (trace (format "    %s" (format-facet-query ff))))
-          (trace "    none"))
-        (trace "  Facet fields:")
-        (if (not-empty (:facet-fields flags))
-          (doseq [ff (:facet-fields flags)]
-            (trace (format "    %s" (if (map? ff) (pr-str ff) ff))))
-          (trace "    none"))
-        (trace "  Facet Numeric Ranges")
-        (if (not-empty (:facet-numeric-ranges flags))
-          (doseq [ff (:facet-numeric-ranges flags)]
-            (trace (format "    start: %s gap: %s end: %s" (:start ff) (:gap ff) (:end ff))))
-          (trace "    none"))
-        (let [other (dissoc flags :facet-filters :facet-qieries :facet-fields)]
-          (when (not-empty other)
-            (trace "  Other parameters to Solr:")
-            (doseq [[k v] other]
-              (trace (format "  %s: %s" k (pr-str v))))))))
+        (let [flags (:original-flags flags)]
+          (trace "Solr Query:")
+          (trace q)
+          (trace "  Facet filters:")
+          (if (not-empty (:facet-filters flags))
+            (doseq [ff (:facet-filters flags)]
+              (trace (format "    %s" (pr-str (format-facet-query ff)))))
+            (trace "    none"))
+          (trace "  Facet queries:")
+          (if (not-empty (:facet-queries flags))
+            (doseq [ff (:facet-queries flags)]
+              (trace (format "    %s" (format-facet-query ff))))
+            (trace "    none"))
+          (trace "  Facet fields:")
+          (if (not-empty (:facet-fields flags))
+            (doseq [ff (:facet-fields flags)]
+              (trace (format "    %s" (if (map? ff) (pr-str ff) ff))))
+            (trace "    none"))
+          (trace "  Facet Numeric Ranges")
+          (if (not-empty (:facet-numeric-ranges flags))
+            (doseq [ff (:facet-numeric-ranges flags)]
+              (trace (format "    start: %s gap: %s end: %s" (:start ff) (:gap ff) (:end ff))))
+            (trace "    none"))
+          (let [other (dissoc flags :facet-filters :facet-queries :facet-fields)]
+            (when (not-empty other)
+              (trace "  Other parameters to Solr:")
+              (doseq [[k v] other]
+                (trace (format "  %s: %s" k (pr-str v)))))))))
     (handler q flags)))
 
 (defn wrap-debug
@@ -696,6 +697,86 @@
                                                :missing (.getMissing info)
                                                }])))
         results))))
+
+(defn heatmap->geojson
+  "Format a heatmap as geoJSON.  The count value is returned as the count attribute in each point property map."
+  [^NamedList heatmap & {:keys [geometry-type] :or {geometry-type :point}}]
+  (let [max-long (.get heatmap "maxX")
+        max-lat (.get heatmap "maxY")
+        min-long (.get heatmap "minX")
+        min-lat (.get heatmap "minY")
+        num-lats (.get heatmap "rows")
+        num-longs (.get heatmap "columns")
+        delta-lat (/ (- max-lat min-lat) num-lats)
+        delta-long (/ (- max-long min-long) num-longs)
+        counts (.get heatmap "counts_ints2D")]
+    (when counts
+      {:type "FeatureCollection"
+       :crs {:type "name"
+             :properties {:name "EPSG:4326"}}
+       :features (let [features (for [row (range (dec num-lats))
+                                      :let [facet-row (nth counts row)
+                                            ;; Solr returns the heatmap "top-down," which appears to
+                                            ;; mean from max lat to min lat.
+                                            latitude (- max-lat (* delta-lat (+ row 0.5)))]
+                                      :when facet-row
+                                      column (range (dec num-longs))
+                                      :let [count (nth facet-row column)
+                                            longitude (+ min-long (* delta-long (+ column 0.5)))]
+                                      :when (> count 0)]
+                                  {:type "Feature"
+                                   :geometry (case geometry-type
+                                               :point {:type "Point" :coordinates [longitude latitude]})
+                                   :properties {:count count}})
+                       max-count (apply max (map #(get-in % [:properties :count]) features))]
+                   (for [feature features]
+                     (update-in feature [:properties :count] (fn [c] (float (/ c max-count))))))})))
+
+(def ^:private heatmap-params
+  [:facet-heatmap :facet :facet-heatmap-format
+   :facet-heatmap-geom :facet-heatmap-grid-level
+   :facet-heatmap-dist-err :facet-heatmap-dist-err-pct])
+
+(defn wrap-heatmap-faceting
+  "Request heatmap faceting, return structure that can be cheshired into geojson.
+   Expects the flags map to contain facets per the Solr standard faceting version
+   of heatmap faceting (e.g., facet.heatmap, facet.heatmap.geom).
+   Returns facet in facet-heatmaps of result meta.
+     facet-heatmap               Required name of field to facet or map containing {:name :result-formatter}
+     facet-heatmap-geom          Optional bounding geometry: WKT or rectangle [minlat,minlong TO maxlat,maxlong]
+     facet-heatmap-grid-level    Optional grid refinement level
+     facet-heatmap-dist-err-pct  Fraction of geom size to compute grid level.  Defaults to 0.15.
+     facet-heatmap-dist-err      Cell error distance to pick grid level indirectly.  See Solr admin manual."
+  [handler]
+  (fn [^SolrQuery query {:keys [facet-heatmap facet-heatmap-geom facet-heatmap-grid-level facet-heatmap-dist-err-pct facet-heatmap-dist-err] :as flags}]
+    (if facet-heatmap
+      (do
+        (.setParam query "facet" true)
+        (.add query "facet.heatmap" (into-array String [(if (map? facet-heatmap) (:name facet-heatmap) facet-heatmap)]))
+        (.add query "facet.heatmap.format" (into-array String ["ints2D"]))
+        (when facet-heatmap-geom
+          (.add query "facet.heatmap.geom" (into-array String [facet-heatmap-geom])))
+        (when facet-heatmap-grid-level
+          (.setParam query "facet.heatmap.gridLevel" facet-heatmap-grid-level))
+        (when facet-heatmap-dist-err
+          (.setParam query "facet.heatmap.distErr" facet-heatmap-dist-err))
+        (when facet-heatmap-dist-err-pct
+          (.setParam query "facet.heatmap.distErrPct" facet-heatmap-dist-err-pct))
+        (let [results (handler query (apply dissoc flags heatmap-params))
+              query-results (:query-results-obj (meta results))]
+          (if query-results
+            (vary-meta results assoc
+                       :facet-heatmaps (let [response (.getResponse ^QueryResponse query-results)
+                                             facet-counts (first (.getAll response "facet_counts"))
+                                             facet-heatmaps (.get facet-counts "facet_heatmaps")]
+                                         (into {}
+                                               (for [[heatmap-field ^NamedList heatmap] facet-heatmaps]
+                                                 [heatmap-field
+                                                  (if (map? facet-heatmap)
+                                                    ((:result-formatter facet-heatmap identity) heatmap)
+                                                    heatmap)]))))
+            results)))
+      (handler query (apply dissoc flags heatmap-params)))))
 
 (defn wrap-faceting
   "Request faceting, supporting discrete, numeric, and date range faceting.
@@ -961,7 +1042,8 @@
                                (instance? SolrQuery q) q
                                :else (throw (Exception. "q parameter must be a string or SolrQuery")))
         middleware (or middleware (:middleware flags) solr-app)]
-    (middleware query (dissoc flags :middleware))))
+    (middleware query
+                (assoc (dissoc flags :middleware) :original-flags flags))))
 
 (defn search*
   "Searches for documents matching q, which can be a string or an instance of SolrQuery.  See search for details about the flags map"
