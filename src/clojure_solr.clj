@@ -24,7 +24,7 @@
                                                   RangeFacet RangeFacet$Count RangeFacet$Date
                                                   SpellCheckResponse SpellCheckResponse$Suggestion)
            (org.apache.solr.client.solrj.response SuggesterResponse Suggestion)
-           (org.apache.solr.common SolrInputDocument SolrDocumentList)
+           (org.apache.solr.common SolrDocument SolrInputDocument SolrDocumentList)
            (org.apache.solr.common.params ModifiableSolrParams CursorMarkParams MoreLikeThisParams)
            (org.apache.solr.common.util NamedList)
            #_(org.apache.solr.util DateMathParser)))
@@ -327,8 +327,11 @@
 (defn- doc-to-hash [doc]
   (into {} (for [[k v] (clojure.lang.PersistentArrayMap/create doc)]
              [(keyword k)
-              (cond (= java.util.ArrayList (type v)) (into [] v)
-                    :else v)])))
+              (if (instance? java.util.List v)
+                (if (every? #(instance? SolrDocument %) v)
+                  (into [] (map doc-to-hash v))
+                  (into [] v))
+                v)])))
 
 (defn- make-param [p]
   (cond

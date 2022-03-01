@@ -662,8 +662,9 @@
                                              format-standard-filter-query}}
                            :df "pagetext"
                            :fields "*,[child]"})]
+      (clojure.pprint/pprint result)
       (is (= 1 (count result)))
       (is (= "doc10" (:id (first result))))
       (is (= 2 (count (:files (first result)))))
-      (is (= #{"doc10!1" "doc10!2"} (set (map #(get % "id") (:files (first result))))))
+      (is (= #{"doc10!1" "doc10!2"} (set (map :id (:files (first result))))))
      )))
