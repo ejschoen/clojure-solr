@@ -643,3 +643,27 @@
       (-> now (t/minus (t/days 1))) "-1DAY"
       (-> now (t/plus (t/years 2))) "+2YEARS"
       (-> now (t/floor t/hour)) "/HOUR")))
+
+(deftest test-nested-document
+  (when (>= (get-solr-major-version) 8)
+    (add-document! {:id "doc10"
+                    :type "Dataset"
+                    :pagetext ["Nothing here"]
+                    :files [{:id "doc10!1"
+                             :type "LAS File"
+                             :pagetext ["A LAS File"]}
+                            {:id "doc10!2"
+                             :type "DLIS File"
+                             :pagetext ["A DLIS File"]}]})
+    (commit!)
+    (let [result (search* "*:*"
+                          {:facet-filters #{{:name "-_nest_parent_" :value "*"
+                                             :formatter
+                                             format-standard-filter-query}}
+                           :df "pagetext"
+                           :fields "*,[child]"})]
+      (is (= 1 (count result)))
+      (is (= "doc10" (:id (first result))))
+      (is (= 2 (count (:files (first result)))))
+      (is (= #{"doc10!1" "doc10!2"} (set (map #(get % "id") (:files (first result))))))
+     )))

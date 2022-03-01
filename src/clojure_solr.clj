@@ -294,10 +294,19 @@
   (let [^SolrInputDocument sdoc (SolrInputDocument. (make-array String 0))]
     (doseq [[key value] doc]
       (let [key-string (name key)
-            boost (get boost-map key)]
-        (if boost
-          (.addField sdoc key-string value boost)
-          (.addField sdoc key-string value))))
+            boost (get boost-map key)
+            is-nested? (and (or (list? value) (vector? value))
+                            (every? map? value))
+            field-value (if is-nested?
+                          (into []
+                                (doall (map (partial make-document boost-map) value)))
+                          value)]
+        (cond (and boost (not is-nested?))
+              (.addField sdoc key-string field-value boost)
+              is-nested?
+              (.addField sdoc key-string field-value)
+              ;;(do (println "**** adding nested" key-string (count field-value)) (.addChildDocuments sdoc field-value))
+              :else (.addField sdoc key-string field-value))))
     sdoc))
 
 (defn add-document!
