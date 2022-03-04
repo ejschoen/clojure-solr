@@ -184,8 +184,8 @@
                                              (assoc r-and-p :collection nil)
                                              r-and-p)))
                       :user-role (into {}
-                                       (for [{:keys [user role]} users-passwords-and-roles]
-                                         [user role]))
+                                       (for [{:keys [user roles role]} users-passwords-and-roles]
+                                         [user (or (not-empty roles) role)]))
                       :class "solr.RuleBasedAuthorizationPlugin"}
       :authentication {:class "solr.BasicAuthPlugin"
                        :blockUnknown true
