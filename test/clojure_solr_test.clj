@@ -348,6 +348,8 @@
     (is (:credentials data))
     (is (:authorization data))
     (is (:authentication data))
+    (is (= (get-in data [:authorization :user-role "i2kweb"]) "query"))
+    (is (= (get-in data [:authorization :user-role "i2kconduit-db"]) "upload"))
     (is (= (last (get-in data [:authorization :permissions]))
            {:role "health"
             :name "health"
