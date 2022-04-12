@@ -29,8 +29,8 @@
             CollectionAdminRequest$Reload]
            [org.apache.solr.client.solrj.response
             CollectionAdminResponse])
-  (:import [org.apache.solr.cloud ZkController])
-  (:import [org.apache.solr.common.cloud SolrZkClient])
+  ;;(:import [org.apache.solr.cloud ZkController])
+  (:import [org.apache.solr.common.cloud SolrZkClient ZkNodeProps ZkStateReader])
   (:import [org.apache.http.client HttpClient]
            [org.apache.http.client.methods HttpPost HttpGet]
            [org.apache.http.entity InputStreamEntity StringEntity ContentType]
@@ -430,10 +430,26 @@
   (with-open [client (SolrZkClient.  zkhost timeout)]
     (.delete client path version true)))
 
-(defn link-configset-to-collection
-  [zkhost configset collection]
+(defn get-collection-properties
+  [zkhost collection & {:keys [timeout] :or {timeout 60}}]
   (with-open [client (SolrZkClient.  zkhost timeout)]
-    (ZkController/linkConfSet client collection configset)))
+    (if-let [parse-string (get-cheshire-parse-string)]
+      (let [path (str org.apache.solr.common.cloud.ZkStateReader/COLLECTIONS_ZKNODE "/" collection)
+            data (.getData client path nil nil true)
+            props (into {} (.getProperties (ZkNodeProps/load data)))
+            props-json (org.apache.solr.common.util.Utils/toJSONString props)]
+        (parse-string props-json))
+      (throw (IllegalStateException. "Missing #'cheshire.core/parse-string")))))
+
+
+(defn link-configset-to-collection
+  [zkhost configset collection & {:keys [timeout] :or {timeout 60}}]
+  (with-open [client (SolrZkClient.  zkhost timeout)]
+    (let [path (str org.apache.solr.common.cloud.ZkStateReader/COLLECTIONS_ZKNODE "/" collection)
+          data (.getData client path nil nil true)
+          props (into {} (.getProperties (ZkNodeProps/load data)))
+          props-updated (assoc props "configName" configset)]
+      (.setData client path (org.apache.solr.common.util.Utils/toJSON props-updated) true))))
 
 (defn get-system-info
   [&{:keys [as] :or {as (if json-enabled? :json :string)}}]
