@@ -25,7 +25,8 @@
             CollectionAdminRequest$ClusterProp
             CollectionAdminRequest$Delete
             CollectionAdminRequest$List
-            CollectionAdminRequest$SplitShard]
+            CollectionAdminRequest$SplitShard
+            CollectionAdminRequest$Reload]
            [org.apache.solr.client.solrj.response
             CollectionAdminResponse])
   (:import [org.apache.solr.common.cloud SolrZkClient])
@@ -314,7 +315,7 @@
   
 (defn reload-collection
   [name & {:keys [timeout] :or {timeout 60}}]
-  (let [CollectionAdminRequest$Reload reload-request
+  (let [^CollectionAdminRequest$Reload reload-request
         (CollectionAdminRequest/reloadCollection name)]
     (.processAndWait reload-request solr/*connection* timeout)))
   
