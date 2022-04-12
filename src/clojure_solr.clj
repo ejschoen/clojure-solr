@@ -1125,9 +1125,11 @@
     changes: Vector of maps containing :attribute, :func [one of :set, :inc, :add], and :value.
    e.g.
      (atomically-update! doc \"cdid\" [{:attribute :client :func :set :value \"darcy\"}])"
-  [doc unique-key-field changes]
+  [doc unique-key-field changes & {:keys [root]}]
   (let [^SolrInputDocument document (SolrInputDocument. (make-array String 0))]
     (.addField document (name unique-key-field) (if (map? doc) (get doc unique-key-field) doc))
+    (when root
+      (.addField document "_root_" root))
     (doseq [{:keys [attribute func value]} changes]
       (.addField document (name attribute) (doto (HashMap. 1) (.put (name func) value))))
     (.add ^SolrClient *connection* document)))

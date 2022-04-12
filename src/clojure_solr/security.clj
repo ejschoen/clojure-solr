@@ -184,7 +184,6 @@
                                              (assoc r-and-p :collection nil)
                                              r-and-p)))
                       :user-role (reduce (fn [m {:keys [user role]}]
-                                           (println "*****" user role)
                                            (assoc m user role))
                                          {}
                                          users-passwords-and-roles)

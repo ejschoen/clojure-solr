@@ -122,20 +122,20 @@
   filename, File, Path, or InputStream to a Zip file.  For all
   but the InputStream, config must name a conf directory for the
   configset containing solrconfig.xml.  "
-  (fn [name config] (type config)))
+  (fn [name config & [opts]] (type config)))
 
 (defmethod upload-config-set :default
-  [name location]
+  [name location & [opts]]
   (throw (IllegalArgumentException. (format "%s is not a valid type.  Only java.io.File, java.nio.file.Path, and InputStream"))))
 
 (defmethod upload-config-set String
-  [name directory-name]
-  (upload-config-set name (Paths/get directory-name (make-array String 0))))
+  [name directory-name & [opts]]
+  (upload-config-set name (Paths/get directory-name (make-array String 0)) opts))
 
 (defmethod upload-config-set File
-  [name file]
+  [name file & [opts]]
   (if (.isDirectory file)
-    (upload-config-set name (.toPath file))
+    (upload-config-set name (.toPath file) opts)
     (throw (IllegalArgumentException. (format "%s is not a directory" file)))))
   
 
@@ -173,17 +173,28 @@
   
 
 (defmethod upload-config-set Path
-  [name path]
+  [name path & [opts]]
   (if-not (Files/isDirectory path (make-array LinkOption 0))
     (throw (IllegalArgumentException. (format "%s is not a directory" (str path))))
     (with-open [zip-in (Path->ZipInputStream path)]
-      (upload-config-set name zip-in))))
+      (upload-config-set name zip-in opts))))
 
 (defmethod upload-config-set InputStream
-  [name zipstream]
+  [name zipstream & [opts]]
   (let [base-url (.getBaseURL solr/*connection*)
         base-client (.getHttpClient (solr/connect base-url))
-        upload-url (str base-url "/admin/configs?action=UPLOAD&name=" name)]
+        upload-url (str base-url
+                        "/admin/configs?action=UPLOAD&name="
+                        name
+                        (if (:overwrite opts)
+                          "&overwrite=true"
+                          "")
+                        (if (:cleanup opts)
+                          "&cleanup=true"
+                          "")
+                        (if (:filePath opts)
+                          (str "&filePath=" (:filePath opts))
+                          ""))]
     (let [entity (doto (InputStreamEntity. zipstream -1)
                    (.setContentType "binary/octet-stream"))
           post (doto (HttpPost. upload-url)
