@@ -93,6 +93,8 @@
        (:hashed-password m)
        (:salt m)))
 
+(def no-generate-password "CLOJURE_SOLR_NO_GENERATE_PASSWORD")
+
 (defn make-security-data
   "In the monadic form, security-json-plus is the conventional Clojure
    representation of Solr's security.json (i.e., keyword keys) with
@@ -150,9 +152,11 @@
                        user-roles)
        (throw (Exception. "Missing role definition for at least one user role")))
      (let [solr-credentials (for [[user password-spec] credentials
-                                  :let [password-data (if (is-password-map? password-spec)
-                                                        password-spec
-                                                        (hash-password password-spec))]]
+                                  :let [password-data (cond (is-password-map? password-spec)
+                                                            password-spec
+                                                            (System/getenv no-generate-password)
+                                                            (throw (Exception. "clojure-solr password generation is disabled"))
+                                                            :else (hash-password password-spec))]]
                               [user (assoc password-data
                                            :basic-auth (Base64/encodeBase64String
                                                         (.getBytes
@@ -167,12 +171,14 @@
   ([users-passwords-and-roles roles-and-permissions]
    (let [credentials (into {}
                            (for [{:keys [user password]} users-passwords-and-roles
-                                 :let [password-data (if (and (map? password)
-                                                              (not-empty (:cleartext-password password))
-                                                              (not-empty (:hashed-password password))
-                                                              (not-empty (:salt password)))
-                                                       password
-                                                       (hash-password password))]]
+                                 :let [password-data (cond (and (map? password)
+                                                                (not-empty (:cleartext-password password))
+                                                                (not-empty (:hashed-password password))
+                                                                (not-empty (:salt password)))
+                                                           password
+                                                           (System/getenv no-generate-password)
+                                                           (throw (Exception. "clojure-solr password generation is disabled"))
+                                                           :else (hash-password password))]]
                              [user (assoc password-data
                                           :basic-auth (Base64/encodeBase64String
                                                        (.getBytes

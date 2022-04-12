@@ -29,6 +29,7 @@
             CollectionAdminRequest$Reload]
            [org.apache.solr.client.solrj.response
             CollectionAdminResponse])
+  (:import [org.apache.solr.cloud ZkController])
   (:import [org.apache.solr.common.cloud SolrZkClient])
   (:import [org.apache.http.client HttpClient]
            [org.apache.http.client.methods HttpPost HttpGet]
@@ -317,7 +318,7 @@
   [name & {:keys [timeout] :or {timeout 60}}]
   (let [^CollectionAdminRequest$Reload reload-request
         (CollectionAdminRequest/reloadCollection name)]
-    (.processAndWait reload-request solr/*connection* timeout)))
+    (str (.processAndWait reload-request solr/*connection* timeout))))
   
 (defn modify-collection
   [name & {:keys [max-shards-per-node
@@ -428,6 +429,11 @@
   [zkhost path version & {:keys [timeout] :or {timeout 60}}]
   (with-open [client (SolrZkClient.  zkhost timeout)]
     (.delete client path version true)))
+
+(defn link-configset-to-collection
+  [zkhost configset collection]
+  (with-open [client (SolrZkClient.  zkhost timeout)]
+    (ZkController/linkConfSet client collection configset)))
 
 (defn get-system-info
   [&{:keys [as] :or {as (if json-enabled? :json :string)}}]
