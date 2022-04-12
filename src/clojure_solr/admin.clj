@@ -312,6 +312,12 @@
   []
   (CollectionAdminRequest/listCollections  solr/*connection*))
   
+(defn reload-collection
+  [name & {:keys [timeout] :or {timeout 60}}]
+  (let [CollectionAdminRequest$Reload reload-request
+        (CollectionAdminRequest/reloadCollection name)]
+    (.processAndWait reload-request solr/*connection* timeout)))
+  
 (defn modify-collection
   [name & {:keys [max-shards-per-node
                   replication-factor
