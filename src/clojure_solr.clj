@@ -1265,7 +1265,7 @@
     (.query ^SolrClient *connection* params)))
 
 (defmacro with-connection [conn & body]
-  `(let [old-conn# (if (and (bound? #'*connection*) (instance? org.apache.solr.client.solrj.embedded.EmbeddedSolrServer *connection*))
+  `(let [old-conn# (if (and (bound? #'*connection*) (.endsWith (.getName (type *connection*)) "EmbeddedSolrServer"))
                      *connection*
                      nil)]
      (binding [*connection* (or old-conn# ~conn)]
