@@ -37,6 +37,8 @@
                                                                   org.apache.httpcomponents/httpclient]
                                    ]
                                   [cheshire "5.9.0"]]}
+             :dev-http {:dependencies [[clj-http "3.10.1"]
+                                       [cheshire "5.9.0"]]}
              :test {:dependencies [[cheshire "5.9.0"]]}
              :1.8 {:dependencies [[org.clojure/clojure "1.8.0"]]}
              :1.9 {:dependencies [[org.clojure/clojure "1.9.0"]]}

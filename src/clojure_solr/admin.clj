@@ -86,10 +86,10 @@
    transaction-log dir: Path to tlog dir"
   [name instance-dir
    & {:keys [config-file schema-file data-dir transaction-log-dir]
-      :or {:config-file "conf/solrconfig.xml"
-           :schema-file "conf/schema.xml"
-           :data-dir "data"
-           :transaction-log-dir nil}}]
+      :or {config-file "conf/solrconfig.xml"
+           schema-file "conf/schema.xml"
+           data-dir "data"
+           transaction-log-dir nil}}]
   (let [response (CoreAdminRequest/createCore name instance-dir
                                               solr/*connection*
                                               config-file
@@ -282,6 +282,10 @@
                                  :num-shards (count (.get collection "shards"))
                                  :num-replicas (apply max (map (fn [[_ shard]] (count (.get shard "replicas"))) (.get collection "shards")))
                                  :shards (str/join "," (keys (.get collection "shards")))
+                                 :shard_health (for [[shard-name shard] (.get collection "shards")]
+                                                 {:shard-name shard-name
+                                                  :health (.get shard "health")
+                                                  :state (.get shard "state")})
                                  :cores (for [[shard-name shard] (.get collection "shards")
                                               [replica-name replica] (.get shard "replicas")]
                                           {:shard-name shard-name
