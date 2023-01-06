@@ -6,7 +6,8 @@
                  [commons-fileupload "1.4" :exclusions [commons-io]]
                  [clj-time "0.11.0" :exclusions [org.clojure/clojure]]]
   :plugins [[lein-pprint "1.3.2"]]
-  :classifiers [["solr8" :solr8]
+  :classifiers [["solr9" :solr9]
+                ["solr8" :solr8]
                 ["solr7" :solr7]
                 ["solr6" :solr6]]
   :pom-plugins [[org.apache.maven.plugins/maven-site-plugin "3.9.1"
@@ -41,6 +42,9 @@
              :1.8 {:dependencies [[org.clojure/clojure "1.8.0"]]}
              :1.9 {:dependencies [[org.clojure/clojure "1.9.0"]]}
              :1.10 {:dependencies [[org.clojure/clojure "1.10.1"]]}
+             :solr9 {:pom-addition [:properties ["solrj.major.version" "9"]]
+                     :dependencies [[org.apache.solr/solr-core "9.0.0" :exclusions [commons-fileupload joda-time]]
+                                    [org.apache.solr/solr-solrj "9.0.0"]]}
              :solr8 {:pom-addition [:properties ["solrj.major.version" "8"]]
                      :dependencies [[org.apache.solr/solr-core "8.6.3" :exclusions [commons-fileupload joda-time]]
                                     [org.apache.solr/solr-solrj "8.6.3"]]}
