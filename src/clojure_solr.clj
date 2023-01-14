@@ -582,7 +582,8 @@
         (catch Exception e
           (throw (ex-info (.getMessage e)
                           {:query query
-                           :flags flags})))))))
+                           :flags flags}
+                          e)))))))
                               
 (defn wrap-show-query
   [handler & {:keys [trace-fn] :or {trace-fn *trace-fn*}}]
