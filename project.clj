@@ -1,4 +1,4 @@
-(defproject cc.artifice/clojure-solr "4.6.0-SNAPSHOT"
+(defproject cc.artifice/clojure-solr "4.7.0-SNAPSHOT"
   :dependencies [;;[org.clojure/clojure "1.8.0"]
                  ;;[org.apache.solr/solr-solrj "6.6.6"]
                  ;;[org.apache.solr/solr-core "6.6.6" :exclusions [commons-fileupload joda-time]]
@@ -40,6 +40,7 @@
                                   [cheshire "5.9.0"]]}
              :dev-http {:dependencies [[clj-http "3.10.1"]
                                        [cheshire "5.9.0"]]}
+             :attachable {:jvm-opts ["-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=4000"]}
              :test {:dependencies [[cheshire "5.9.0"]]}
              :1.8 {:dependencies [[org.clojure/clojure "1.8.0"]]}
              :1.9 {:dependencies [[org.clojure/clojure "1.9.0"]]}
