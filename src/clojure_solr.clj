@@ -15,6 +15,9 @@
            (org.apache.http.impl.client BasicCredentialsProvider HttpClientBuilder CloseableHttpClient)
            (org.apache.http.protocol HttpContext HttpCoreContext)
            (org.apache.solr.client.solrj SolrQuery SolrRequest$METHOD SolrClient)
+           (org.apache.http.ssl SSLContexts SSLContextBuilder)
+           (javax.net.ssl SSLContext)
+           (org.apache.http.conn.ssl SSLConnectionSocketFactory NoopHostnameVerifier TrustSelfSignedStrategy)
            (org.apache.solr.client.solrj.impl HttpSolrClient HttpSolrClient$Builder HttpClientUtil
                                               ConcurrentUpdateSolrClient ConcurrentUpdateSolrClient$Builder)
            (java.util.jar Manifest)
@@ -189,12 +192,27 @@
     (EmbeddedSolrServer. container (:core solr-client-options))
     ))  
 
+(defn ^SSLConnectionSocketFactory build-connection-socket-factory
+  [{:keys [ssl-trust-store ssl-trust-password]}]
+  ;;(println "******** build-connection-socket-factory: trust store:" (pr-str ssl-trust-store))
+  (when ssl-trust-store
+    (let [^SSLContextBuilder sslbuilder (SSLContexts/custom)]
+      (cond (= :self-signed ssl-trust-store)
+            (.loadTrustMaterial sslbuilder nil (TrustSelfSignedStrategy.))
+            ssl-trust-password
+            (.loadTrustMaterial sslbuilder ssl-trust-store (.toCharArray ssl-trust-password))
+            :else (.loadTrustMaterial sslbuilder ssl-trust-store))
+      (let [^SSLContext ssl-context (.build sslbuilder)]
+        (SSLConnectionSocketFactory. ssl-context NoopHostnameVerifier/INSTANCE)))))
+
 (defn ^HttpSolrClient connect [url & [conn-manager solr-client-options]]
   "Create an HttpSolrClient connection to a Solr URI. Optionally use
    a provided connection-manager, such as PoolingHttpClientConnectionManager,
    for situations where Solr's default connection manager cannot keep up
    with demand.
    solr-client-options is a map with:
+     :ssl-trust-store           File object pointing trust store .p12 file, or :self-signed
+     :ssl-trust-password        Optional password for trust store
      :allow-compression true/false
      :kerberos-delegation-token string
      :socket-timeout int in millis
@@ -224,9 +242,13 @@
                                                      auth-scope (make-auth-scope (.getHostName target-host) (.getPort target-host))
                                                      creds (.getCredentials credentials-provider auth-scope)]
                                                  (when creds
-                                                   (.update auth-state (BasicScheme.) creds))))))))))
-        ^CloseableHttpClient client (when builder (.build builder))]
-    (make-solr-client clean-url client solr-major-version solr-client-options)))
+                                                   (.update auth-state (BasicScheme.) creds))))))))))]
+    (when builder
+      (when (:ssl-trust-store solr-client-options)
+        (when-let [ssl-socket-factory (build-connection-socket-factory solr-client-options)]
+          (.setSSLSocketFactory builder ssl-socket-factory))))
+    (let [^CloseableHttpClient client (when builder (.build builder))]
+      (make-solr-client clean-url client solr-major-version solr-client-options))))
 
 (defn- make-document [boost-map doc]
   (let [^SolrInputDocument sdoc (SolrInputDocument. (make-array String 0))]
