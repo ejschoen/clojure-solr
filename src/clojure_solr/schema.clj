@@ -6,9 +6,44 @@
            (org.apache.solr.common SolrInputDocument)
            (org.apache.solr.client.solrj SolrQuery SolrRequest$METHOD)
            (org.apache.solr.common.params ModifiableSolrParams))
+  (:import [org.apache.http StatusLine HttpResponse]
+           [org.apache.http.client HttpClient]
+           [org.apache.http.client.methods HttpPost HttpGet]
+           [org.apache.http.entity ByteArrayEntity]
+           [org.apache.http.util EntityUtils])
   (:require [clojure-solr :as solr]))
 
 
+(defn get-schema
+  "Get the complete schema for the current Solr connection (e.g., (with-connection (connect URL) (get-schema).
+   Optional accept-type can be json (default), xml, or schema.xml.
+   The schema is the :body key of the returned map, and must be parsed by a JSON or XML parser as appropriate.
+   Throws an ex-info exception on failure."
+  ([]
+   (get-schema "json"))
+  ([accept-type]
+   (let [^HttpClient client (.getHttpClient solr/*connection*)
+         [_ solr-server-url collection-or-core] (re-matches #"(https?://.+/solr)/([^/]+)(?:/.+)?" (.getBaseURL solr/*connection*))]
+     (if solr-server-url
+       (let [url (str solr-server-url "/" collection-or-core "/schema?wt=" accept-type)
+             ^HttpGet get (HttpGet. url)
+             ^HttpResponse response (.execute client get)]
+         (if (>= (.getStatusCode ^StatusLine (.getStatusLine response)) 400)
+           (let [entity (.getEntity response)
+                 content-type (.getValue (.getContentType entity))
+                 [_ content-type-basic] (re-matches #"([^;]+)(?:;.+)?" content-type) ]
+             (throw (ex-info (format "Solr request failure from %s" url)
+                             {:status (.getStatusCode (.getStatusLine response))
+                              :content-type content-type
+                              :body (if (#{"text/plain" "text/html" "application/json"} content-type-basic)
+                                      (EntityUtils/toString entity)
+                                      (EntityUtils/toByteArray entity))})))
+           (let [entity (.getEntity response)
+                 content-type (.getValue (.getContentType entity))]
+             {:status (.getStatusCode (.getStatusLine response))
+              :content-type content-type
+              :body (EntityUtils/toString entity)})))))))
+   
 (defn get-schema-fields
   []
   (let [generic-response (.request solr/*connection* (SchemaRequest$Fields.))
