@@ -294,11 +294,11 @@
                                            :base-url (.get replica "base_url")
                                            :type (.get replica "type")
                                            :node-name (.get replica "node_name")})
-                                 :max-shards-per-node (Integer/parseInt (.get collection "maxShardsPerNode"))
-                                 :replication-factor (Integer/parseInt (.get collection "replicationFactor"))
-                                 :nrt-replicas (Integer/parseInt (.get collection "nrtReplicas"))
-                                 :pull-replicas (Integer/parseInt (.get collection "pullReplicas"))
-                                 :tlog-replicas (Integer/parseInt (.get collection "tlogReplicas"))
+                                 :max-shards-per-node (Integer/parseInt (or (.get collection "maxShardsPerNode") "1"))
+                                 :replication-factor (Integer/parseInt (or (.get collection "replicationFactor") "1"))
+                                 :nrt-replicas (Integer/parseInt (or (.get collection "nrtReplicas") "0"))
+                                 :pull-replicas (Integer/parseInt (or (.get collection "pullReplicas") "0"))
+                                 :tlog-replicas (Integer/parseInt (or (.get collection "tlogReplicas") "0"))
                                  :node-set (str/join #","
                                                      (distinct
                                                       (for [[shard shard-desc] (.get collection "shards")
