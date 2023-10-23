@@ -129,17 +129,23 @@
 
 (defn process-facets
   "Recursively process facets into a format similar to what clojure-solr/search* returns"
-  [^SimpleOrderedMap facets facet-map]
+  [^SimpleOrderedMap facets facet-map {:keys [facet-hier-sep] :as flags}]
   (doall
    (for [[facet-name facet-description] facet-map]
      (let [^SimpleOrderedMap facet-response (.get facets facet-name)
            ^java.util.List buckets (.get facet-response "buckets")]
        {:name facet-name
-        :values (for [^SimpleOrderedMap bucket buckets]
-                  (merge {:value (.get bucket "val")
+        :values (for [^SimpleOrderedMap bucket buckets
+                      :let [val (.get bucket "val")]]
+                  (merge {:value (format-result val {})
                           :count (.get bucket "count")}
+                         (when (and facet-hier-sep (string? val))
+                           (let [split-path (str/split val facet-hier-sep)]
+                             {:split-path split-path
+                              :depth (count split-path)
+                              :title (last split-path)}))
                          (when-let [sub-facets (get facet-description "facet")]
-                           {:facets (process-facets bucket sub-facets)})))}))))
+                           {:facets (process-facets bucket sub-facets flags)})))}))))
 
 (defn wrap-faceting
   "Faceting middleware: Handles facets option of flags and processes the result."
@@ -150,7 +156,7 @@
           (let [result (handler request flags)]
             (with-meta
               (-> result
-                  (update-in [:facets] process-facets (get (:request-json (meta result)) "facet"))
+                  (update-in [:facets] process-facets (get (:request-json (meta result)) "facet") flags)
                   (dissoc "facets"))
               (meta result))))
       (handler request flags))))
@@ -188,7 +194,7 @@
 
 (defn query
   "Query Solr with the JSON api and return the result"
-  [query {:keys [middleware params filters facets sort limit offset fields method]
+  [query {:keys [middleware params filters facets sort limit offset fields method facet-hier-sep]
           :or {method :post
                middleware jsolr-app}
           :as flags}]
