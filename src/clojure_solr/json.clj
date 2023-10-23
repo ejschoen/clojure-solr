@@ -1,15 +1,19 @@
 (ns clojure-solr.json
   (:require [clojure.string :as str]
-            [clojure.pprint :as pprint])
+            [clojure.pprint :as pprint]
+            [clojure.java.io :as io])
   (:require [clj-time.core :as t])
   (:require [clj-time.format :as tformat])
   (:require [clj-time.coerce :as tcoerce])
+  (:require [cheshire.core :as cheshire])
   (:require [clojure-solr :as solr])
   (:import (java.util Map)
-           (org.apache.solr.client.solrj.request.json JsonQueryRequest TermsFacetMap RangeFacetMap QueryFacetMap)))
+           (org.apache.solr.common.util SimpleOrderedMap)
+           (org.apache.solr.client.solrj.request.json JsonQueryRequest TermsFacetMap RangeFacetMap RangeFacetMap$OtherBuckets QueryFacetMap)))
 
 
 (defprotocol Limit
+  "A protocol for converting range facet start and end to values accepted by the SolrJ RangeFacetMap object"
   (coerce-limit [this]))
 
 (extend-protocol Limit
@@ -29,6 +33,7 @@
   (coerce-limit [this] (tcoerce/to-date (tcoerce/from-string this))))
 
 (defprotocol Gap
+  "A protocol for converting range facet gap values to values accepted by the SolrJ RangeFacetMap object"
   (coerce-gap [this]))
 
 (extend-protocol Gap
@@ -44,59 +49,151 @@
   (coerce-gap [this] this))
 
 
-
 (defn terms-facet
-  [field & {:keys [prefix min-count sub-facets]}]
+  "Create a facet command for term faceting"
+  [field & {:keys [prefix min-count sub-facets offset limit include-total?]}]
   (let [facet-map (doto (TermsFacetMap. field)
-                    (cond-> prefix (.setTermPrefix prefix)
+                    (cond-> include-total? (.includeTotalNumBuckets true)
+                            offset (.setBucketOffset offset)
+                            limit (.setLimit limit)
+                            prefix (.setTermPrefix prefix)
                             min-count (.setMinCount min-count)))]
     (when (not-empty sub-facets)
       (doseq [[field sub-facet-map] sub-facets]
         (.withSubFacet facet-map (name field) sub-facet-map)))
     facet-map))
 
+(def ^:private facet-other-buckets
+  {:after RangeFacetMap$OtherBuckets/AFTER
+   :all RangeFacetMap$OtherBuckets/ALL
+   :before RangeFacetMap$OtherBuckets/BEFORE
+   :between RangeFacetMap$OtherBuckets/BETWEEN
+   :none RangeFacetMap$OtherBuckets/NONE})
+
 (defn range-facet
-  [field start end gap & {:keys [sub-facets hard-end? min-count]}]
+  "Create a facet command for range faceting"
+  [field start end gap & {:keys [sub-facets hard-end? min-count other-buckets]}]
   (let [facet (doto (RangeFacetMap. field (coerce-limit start) (coerce-limit end) (coerce-gap gap))
                 (.setHardEnd (boolean hard-end?))
                 (.setMinCount (or min-count 1)))]
     (when (not-empty sub-facets)
       (doseq [[field sub-facet-map] sub-facets]
         (.withSubFacet facet (name field) sub-facet-map)))
+    (when other-buckets
+      (.setOtherBuckets facet (get facet-other-buckets other-buckets RangeFacetMap$OtherBuckets/NONE)))
     facet))
 
-(defn query
-  [query {:keys [params filters facets sort limit offset fields method]
-          :or {method :post}}]
-  (let [request (doto (JsonQueryRequest.)
-                  (.setQuery query)
-                  (cond-> sort (.setSort sort)
-                          limit (.setLimit limit)
-                          offset (.setOffset offset)
-                          fields (.returnFields fields)
-                          method (.setMethod (get solr/http-methods method (get solr/http-methods :post)))))]
+(defmulti format-result
+  "Convert a SolrJ result to a Clojure data structure.  flags is a map of options:
+   :date-function - Convert date values; function of a java.util.Date (default: clj-time.coerce/from-date)
+   :keyfn         - Function for map keys; default: identity
+   :recur?        - true to recur into map values (always recurs into arraylist values)"
+  (fn [x flags] (class x)))
+
+(defmethod format-result :default [x flags] x)
+
+(defmethod format-result java.util.Date [x {:keys [date-function] :or {date-function tcoerce/from-date}}]
+  (date-function x))
+
+(defmethod format-result org.apache.solr.common.util.SimpleOrderedMap [x {:keys [keyfn recur?]
+                                                                          :or {keyfn identity recur? true}
+                                                                          :as flags}]
+  (into {}
+        (for [^java.util.Map$Entry entry (iterator-seq (.iterator x))]
+          [(keyfn (.getKey entry))
+           (if recur?
+             (format-result (.getValue entry) flags)
+             (.getValue entry))])))
+
+(defmethod format-result java.util.ArrayList [x flags]
+  (into [] (for [v x] (format-result v flags))))
+
+(defn do-query
+  "Execute the json query request and shallowly format the response into a map with keywordized keys
+   (i.e., :responseHeader, :response, :facets).
+   The result has metadata with:
+    :request      - The value of request
+    :request-json - The value of request converted into a JSON object
+    :response     - The raw response"
+  [^JsonQueryRequest request flags]
+  (let [raw-response (.request solr/*connection* request)]
+    (with-meta
+      (format-result raw-response {:recur? false :keyfn keyword})
+      {:request request
+       :request-json (with-open [stream (java.io.ByteArrayOutputStream.)]
+                       (.write (.getContentWriter request "application/json") stream)
+                       (with-open [input-stream (java.io.ByteArrayInputStream. (.toByteArray stream))
+                                   reader (io/reader input-stream)]
+                         (doall (cheshire/parse-stream reader))))
+       :response raw-response})))
+
+(defn process-facets
+  "Recursively process facets into a format similar to what clojure-solr/search* returns"
+  [^SimpleOrderedMap facets facet-map]
+  (doall
+   (for [[facet-name facet-description] facet-map]
+     (let [^SimpleOrderedMap facet-response (.get facets facet-name)
+           ^java.util.List buckets (.get facet-response "buckets")]
+       {:name facet-name
+        :values (for [^SimpleOrderedMap bucket buckets]
+                  (merge {:value (.get bucket "val")
+                          :count (.get bucket "count")}
+                         (when-let [sub-facets (get facet-description "facet")]
+                           {:facets (process-facets bucket sub-facets)})))}))))
+
+(defn wrap-faceting
+  "Faceting middleware: Handles facets option of flags and processes the result."
+  [handler]
+  (fn [^JsonQueryRequest request {:keys [facets] :as flags}]
+    (if (not-empty facets)
+      (do (doseq [[facet-name facet-map] facets] (.withFacet request (name facet-name) facet-map))
+          (let [result (handler request flags)]
+            (with-meta
+              (-> result
+                  (update-in [:facets] process-facets (get (:request-json (meta result)) "facet"))
+                  (dissoc "facets"))
+              (meta result))))
+      (handler request flags))))
+
+(defn wrap-core-search
+  "Core search middleware: handles query, sort, limit, offset, fields, filters, params, and methods,
+   and formats the result as a sequence of maps (one per Solr doc)"
+  [handler]
+  (fn [^JsonQueryRequest request {:keys [params filters sort limit offset fields method]
+                                  :or {method :post}
+                                  :as flags}]
+    (doto request
+      (cond-> sort (.setSort sort)
+              limit (.setLimit limit)
+              offset (.setOffset offset)
+              fields (.returnFields fields)
+              method (.setMethod (get solr/http-methods method (get solr/http-methods :post)))))
     (when (not-empty filters)
       (doseq [filter filters]
         (.withFilter request (solr/format-facet-query filter))))
     (when (not-empty params)
       (doseq [[param value] params]
         (.withParam request (name param) value)))
-    (when (not-empty facets)
-      (doseq [[facet-name facet-map] facets] (.withFacet request (name facet-name) facet-map)))
-    request))
+    (let [result (handler request flags)]
+      (with-meta
+        (-> result
+            (update-in [:response] #(format-result % {}))
+            (dissoc "response"))
+        (meta result)))))
+
+(def jsolr-app
+  (-> do-query
+      wrap-core-search
+      wrap-faceting))
+
+(defn query
+  "Query Solr with the JSON api and return the result"
+  [query {:keys [middleware params filters facets sort limit offset fields method]
+          :or {method :post
+               middleware jsolr-app}
+          :as flags}]
+  (let [request (doto (JsonQueryRequest.)
+                  (.setQuery query))]
+    (middleware request flags)))
                   
     
-(defmulti format-result class)
-
-(defmethod format-result :default [x] x)
-
-(defmethod format-result java.util.Date [x]
-  (tcoerce/from-date x))
-
-(defmethod format-result org.apache.solr.common.util.SimpleOrderedMap [x]
-  (into {}
-        (for [^java.util.Map$Entry entry (iterator-seq (.iterator x))]
-          [(.getKey entry) (format-result (.getValue entry))])))
-
-(defmethod format-result java.util.ArrayList [x]
-  (into [] (for [v x] (format-result v))))
