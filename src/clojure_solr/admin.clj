@@ -273,7 +273,11 @@
         response (.request solr/*connection* request)
         cluster (.get response "cluster")
         live-nodes (.get cluster "live_nodes")
-        collections (.get cluster "collections")]
+        collections (.get cluster "collections")
+        safe-parseint (fn [val default]
+                        (cond (string? val) (Integer/parseInt val)
+                              val val
+                              :else default))]
     {:collections (into {}
                         (for [[name collection] collections]
                           [name {:config-name (.get collection "configName")
@@ -295,10 +299,10 @@
                                            :type (.get replica "type")
                                            :node-name (.get replica "node_name")})
                                  :max-shards-per-node (Integer/parseInt (or (.get collection "maxShardsPerNode") "1"))
-                                 :replication-factor (Integer/parseInt (or (.get collection "replicationFactor") "1"))
-                                 :nrt-replicas (Integer/parseInt (or (.get collection "nrtReplicas") "0"))
-                                 :pull-replicas (Integer/parseInt (or (.get collection "pullReplicas") "0"))
-                                 :tlog-replicas (Integer/parseInt (or (.get collection "tlogReplicas") "0"))
+                                 :replication-factor (safe-parseint (.get collection "replicationFactor") 1)
+                                 :nrt-replicas (safe-parseint (.get collection "nrtReplicas") 0)
+                                 :pull-replicas (safe-parseint (.get collection "pullReplicas") 0)
+                                 :tlog-replicas (safe-parseint (.get collection "tlogReplicas") 0)
                                  :node-set (str/join #","
                                                      (distinct
                                                       (for [[shard shard-desc] (.get collection "shards")
