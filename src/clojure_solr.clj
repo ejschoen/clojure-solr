@@ -174,11 +174,6 @@
   [host port]
   (AuthScope. host port))
 
-(defn clear-credentials
-  "Remove *all* basic authentication credentials for all Solr URIs."
-  []
-  (.clear basic-credentials-provider))
-
 (defn get-url-details
   [url]
   (let [details (get @url-details url)]
@@ -230,6 +225,11 @@
   (get-authenticator [this]))
 
 (defonce authenticators (atom {}))
+
+(defn clear-credentials
+  "Remove *all* basic authentication credentials for all Solr URIs."
+  []
+  (reset! authenticators {}))
 
 (extend-protocol SolrAuthenticatorLookup
   String

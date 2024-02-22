@@ -1,5 +1,6 @@
 (ns clojure-solr.security
   (:use [clojure-solr :only [*connection*]])
+  (:require [clojure-solr.admin :as solradmin])
   (:require [clojure.pprint :as pprint])
   (:import [java.nio.charset StandardCharsets]
            [java.security MessageDigest NoSuchAlgorithmException SecureRandom]
@@ -255,3 +256,134 @@
   [body]
   (security-request "/admin/authorization" body))
     
+(defn get-security-json
+  [zkhost]
+  (cheshire.core/parse-string
+   (String.
+    (solradmin/download-from-zookeeper zkhost "/security.json"))
+   false))
+
+(defn put-security-json
+  [security-json zkhost]
+  (solradmin/upload-to-zookeeper zkhost "/security.json"
+                                 (.getBytes
+                                  (cheshire.core/generate-string security-json))))
+
+(defn add-user-role
+  [security-json user role]
+  (let [user-roles (get-in security-json ["authorization" "user-role"])]
+    (if (get user-roles user)
+      (update-in security-json ["authorization" "user-role" user]
+                 concat [role])
+      (update-in security-json ["authorization" "user-role"]
+                 assoc user [role]))))
+
+(defn add-permission
+  [security-json at-index permission]
+  {:pre [(or (get permission :role) (get permission "role"))]}
+  (let [permissions (get-in security-json ["authorization" "permissions"])]
+    (if (or (nil? at-index) (>= at-index (count permissions)))
+      (update-in security-json ["authorization" "permissions"]
+                 concat [permission])
+      (update-in security-json ["authorization" "permissions"]
+                 (fn [old]
+                   (let [[before after] (split-at (if (< at-index 0)
+                                                    (+ (count permissions) at-index)
+                                                    at-index)
+                                                  old)]
+                     (concat before [permission] after)))))))
+  
+(defn remove-permission
+  [security-json at-index]
+  (let [permissions (get-in security-json ["authorization" "permissions"])]
+    (if (< at-index (count permissions))
+      (update-in security-json ["authorization" "permissions"]
+                 (fn [old]
+                   (let [[before after] (split-at at-index old)]
+                     (concat before (rest after)))))
+      security-json)))
+
+(defn move-permission
+  [security-json from to]
+  (let [permissions (get-in security-json ["authorization" "permissions"])
+        permission (nth permissions from)]
+    (when-not permission
+      (throw (Exception. (format "No permission at %s: %s" from permissions))))
+    (when-not (get permission "role")
+      (throw (Exception. (format "No role for permission at %s: %s" from permission))))
+    (add-permission
+     (update-in security-json ["authorization" "permissions"]
+                (fn [old]
+                  (let [[before after] (split-at from old)]
+                    (concat before (rest after)))))
+     to
+     permission)))
+
+(defn format-multi-authentication
+  [auth-schemes]
+  {:pre [(every? #(get % "scheme") auth-schemes)
+         (every? #(= 1 %) (vals (frequencies (map #(get % "scheme") auth-schemes))))]}
+  {"class" "solr.MultiAuthPlugin"
+   "schemes" auth-schemes})
+
+(defn format-jwt-authentication
+  [issuers & {:keys [block-unknown] :or {block-unknown true}}]
+  {:pre [(every? #(and (or (get % "name") (get % :name))
+                       (or (get % "clientId") (get % :clientId)))
+                 issuers)]}
+  {"scheme" "bearer"
+   "blockUnknown" block-unknown
+   "class" "solr.JWTAuthPlugin"
+   "issuers" issuers})
+
+(def scheme-by-class
+  {"solr.BasicAuthPlugin" "basic"
+   "solr.JWTAuthPlugin" "bearer"})
+
+(def authorization-class-by-scheme
+  {"basic" {:class "solr.RuleBasedAuthorizationPlugin" :original-fields ["user-role"]}
+   "bearer" {:class "solr.ExternalRoleRuleBasedAuthorizationPlugin"}})
+
+(defn format-multi-authorization
+  [existing-authorization new-authentication-schemes]
+  {"class" "solr.MultiAuthRuleBasedAuthorizationPlugin"
+   "permissions" (get existing-authorization "permissions")
+   "schemes" (for [scheme new-authentication-schemes
+                   :let [{:keys [class original-fields]} (get authorization-class-by-scheme scheme)]
+                   :when class]
+               (merge {"scheme" scheme
+                       "class" class}
+                      (when original-fields
+                        (select-keys existing-authorization original-fields))))})
+
+(defn format-upgrade-to-multiauth
+  [existing-security new-auth-schemes]
+  (let [existing-authorization (get existing-security "authorization")
+        existing-authentication (get existing-security "authentication")
+        new-authentication (if (= (get existing-authentication "class") "solr.MultiAuthPlugin")
+                             existing-authentication
+                             (format-multi-authentication
+                              (concat [(assoc existing-authentication
+                                              "scheme"
+                                              (get scheme-by-class (get existing-authentication "class")))]
+                                      new-auth-schemes)))
+        new-authorization (if (= (get existing-authorization "class") "solr.MultiAuthRuleBasedAuthorizationPlugin")
+                            existing-authorization
+                            (format-multi-authorization existing-authorization
+                                                           (map #(get % "scheme")
+                                                                (get new-authentication "schemes"))))]
+    (-> existing-security
+        (assoc "authentication" new-authentication)
+        (assoc "authorization" new-authorization))))
+
+
+
+;; If zookeeper is available at localhost:9181, this converts
+;; standard basic auth to multi-auth with JWT
+#_(-> (get-security-json "localhost:9181")
+      (format-upgrade-to-multiauth [(format-jwt-auth [{:name "Entra ID"
+                                                       :wellKnownUrl "https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration"
+                                                       :clientId "252ce553-xxxx-xxxx-xxxx-xxxxxxxx72c" }])])
+      (add-permission -1 {:role "i2kreader"
+                          :collection "i2ksearch"
+                          :name "read"}))
