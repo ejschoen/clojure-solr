@@ -136,11 +136,13 @@
   ([security-json-plus]
    (let [permissions (get-in security-json-plus [:authorization :permissions])
          user-roles (get-in security-json-plus [:authorization :user-role])
+         auth-class (get-in security-json-plus [:authentication :class])
          credentials (get-in security-json-plus [:authentication :credentials])]
      (when-not (every? (fn [[user _]] (get user-roles user)) credentials)
        (throw (Exception. "Missing role for at least one user")))
-     (when-not (every? (fn [[user _]] (get credentials user)) user-roles)
-       (throw (Exception. "Missing user credential for at least one user role assignment")))
+     (when (= auth-class "solr.BasicAuthPlugin")
+       (when-not (every? (fn [[user _]] (get credentials user)) user-roles)
+         (throw (Exception. "Missing user credential for at least one user role assignment")))) 
      (when-not (every? (fn [[_ role-or-roles]]
                          (every? (fn [role]
                                    (some? (fn [permission]
@@ -162,11 +164,13 @@
                                                         (.getBytes
                                                          (str user ":" (:cleartext-password password-data)))))])]
        {:authorization (:authorization security-json-plus)
-        :authentication {:class "solr.BasicAuthPlugin"
-                         :blockUnknown true
-                         :credentials (into {}
-                                            (for [[user creds] solr-credentials]
-                                              [user (str (:hashed-password creds) " " (:salt creds))]))}
+        :authentication (if (= auth-class "solr.BasicAuthPlugin")
+                          {:class "solr.BasicAuthPlugin"
+                           :blockUnknown true
+                           :credentials (into {}
+                                              (for [[user creds] solr-credentials]
+                                                [user (str (:hashed-password creds) " " (:salt creds))]))}
+                          (:authentication security-json-plus)) 
         :credentials solr-credentials})))
   ([users-passwords-and-roles roles-and-permissions]
    (let [credentials (into {}

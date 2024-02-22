@@ -8,7 +8,7 @@
            (java.util Base64 HashMap List ArrayList Map)
            (java.nio.charset Charset)
            (org.apache.http HttpRequest HttpRequestInterceptor HttpHeaders)
-           (org.apache.http.auth AuthScope UsernamePasswordCredentials)
+           (org.apache.http.auth AuthState AuthScope UsernamePasswordCredentials)
            (org.apache.http.client.protocol HttpClientContext)
            (org.apache.http.config SocketConfig SocketConfig$Builder)
            (org.apache.http.impl.auth BasicScheme)
@@ -33,7 +33,7 @@
            #_(org.apache.solr.util DateMathParser)))
 
 (defonce ^:private url-details (atom {}))
-(defonce ^{:private true :tag BasicCredentialsProvider}  credentials-provider (BasicCredentialsProvider.))
+(defonce ^{:private true :tag BasicCredentialsProvider}  basic-credentials-provider (BasicCredentialsProvider.))
 
 (declare ^{:dynamic true :tag SolrClient} *connection*)
 
@@ -177,14 +177,7 @@
 (defn clear-credentials
   "Remove *all* basic authentication credentials for all Solr URIs."
   []
-  (.clear credentials-provider))
-
-(defn set-credentials
-  "Set basic authentication credentials for a given Solr URI."
-  [uri name password]
-  (.setCredentials credentials-provider
-                   (make-auth-scope (.getHost uri) (.getPort uri))
-                   (make-basic-credentials name password)))
+  (.clear basic-credentials-provider))
 
 (defn get-url-details
   [url]
@@ -205,9 +198,77 @@
                            (str (.getScheme uri) "://" (.getHost uri))
                            (str (.getScheme uri) "://" (.getHost uri) ":" (.getPort uri)))]
                 ;;(println "**** CLOJURE-SOLR: Adding credentials for host" host)
-                (set-credentials uri name password)))
+                ;;IS THIS A GOOD IDEA?
+                ;;(set-credentials uri name password)
+                ))
             details)
           :else nil)))
+
+(defprotocol SolrAuthentication
+  (add-authentication [this request context]))
+
+(deftype SolrBasicAuthentication [^BasicCredentialsProvider basic-credentials-provider]
+    SolrAuthentication
+    (add-authentication [this request  context]
+      (let [^AuthState auth-state (.getAttribute ^HttpContext context HttpClientContext/TARGET_AUTH_STATE)]
+        (when (nil? (.getAuthScheme auth-state))
+          (let [target-host (.getAttribute context HttpCoreContext/HTTP_TARGET_HOST)
+                auth-scope (make-auth-scope (.getHostName target-host) (.getPort target-host))
+                creds (.getCredentials basic-credentials-provider auth-scope)]
+            (when creds
+              (.update auth-state (BasicScheme.) creds)))))))
+
+#_(deftype SolrJWTAuthentication []
+  SolrAuthentication
+  (get-token [this]
+    )
+  (add-authentication [this ^HttpRequest request ^HttpContext context]
+    (.setHeader request "Authorization" (str "Bearer " (.get-token this)))))
+
+
+(defprotocol SolrAuthenticatorLookup
+  (get-authenticator [this]))
+
+(defonce authenticators (atom {}))
+
+(extend-protocol SolrAuthenticatorLookup
+  String
+  (get-authenticator [this]
+    (let [uri (URI. this)]
+      (get-authenticator uri)))
+  URI
+  (get-authenticator [^URI this]
+    (let [host (.getHost this)
+          port (.getPort this)
+          authenticator (get-in @authenticators [host port])
+          userinfo (.getUserInfo this)]
+      (cond (and authenticator (not userinfo))
+            authenticator
+            userinfo (let [provider (BasicCredentialsProvider.)
+                           [name password] (str/split userinfo #":")]
+                         (.setCredentials provider 
+                                          ^AuthScope (make-auth-scope host port) 
+                                          ^UsernamePasswordCredentials (make-basic-credentials name password))
+                         (SolrBasicAuthentication. provider))
+            :else
+            nil)))
+  java.net.URL
+  (get-authenticator [^java.net.URL this]
+    (get-authenticator (.toURI this))))
+
+
+(defn set-credentials
+  "Set basic authentication credentials for a given Solr URI."
+  ([uri authenticator]
+   (swap! authenticators assoc-in [(.getHost uri) (.getPort uri)] authenticator))
+  ([^java.net.URI uri name password]
+   (let [provider (BasicCredentialsProvider.)]
+     (.setCredentials provider 
+                      ^AuthScope (make-auth-scope (.getHost uri) (.getPort uri)) 
+                      ^UsernamePasswordCredentials (make-basic-credentials name password))
+     (set-credentials uri (SolrBasicAuthentication. provider) ) )))
+
+
 
 (defmulti make-solr-client (fn [url http-client solr-major-version solr-client-options] (:type solr-client-options)))
 
@@ -280,10 +341,9 @@
      :home-dir                  path to directory containing core files
      :core                      name of core to create"
   (let [solr-major-version (get-solr-major-version)
-        {:keys [clean-url name password] :as details} (get-url-details url)
-        ^HttpClientBuilder builder (when details
-                                     (doto ^HttpClientBuilder (HttpClientBuilder/create)
-                                       (.setDefaultCredentialsProvider credentials-provider)
+        authenticator (get-authenticator url)
+        ^HttpClientBuilder builder (doto ^HttpClientBuilder (HttpClientBuilder/create)
+                                       (.setDefaultCredentialsProvider basic-credentials-provider)
                                        (cond-> conn-manager (.setConnectionManager conn-manager))
                                        (cond-> (and (:socket-timeout solr-client-options)
                                                     (< solr-major-version 7))
@@ -293,25 +353,18 @@
                                                                            (int (:socket-timeout
                                                                                  solr-client-options))))]
                                                                     (.build scbuilder))))
-                                       
-                                       
-                                       (.addInterceptorFirst 
-                                        (reify 
-                                          HttpRequestInterceptor
-                                          (^void process [this ^HttpRequest request ^HttpContext context]
-                                           (let [auth-state (.getAttribute context HttpClientContext/TARGET_AUTH_STATE)]
-                                             (when (nil? (.getAuthScheme auth-state))
-                                               (let [target-host (.getAttribute context HttpCoreContext/HTTP_TARGET_HOST)
-                                                     auth-scope (make-auth-scope (.getHostName target-host) (.getPort target-host))
-                                                     creds (.getCredentials credentials-provider auth-scope)]
-                                                 (when creds
-                                                   (.update auth-state (BasicScheme.) creds))))))))))]
+                                       (cond-> authenticator
+                                         (.addInterceptorFirst 
+                                          (reify 
+                                              HttpRequestInterceptor
+                                            (^void process [this ^HttpRequest request ^HttpContext context]
+                                             (add-authentication authenticator request context))))))]
     (when builder
       (when (:ssl-trust-store solr-client-options)
         (when-let [ssl-socket-factory (build-connection-socket-factory solr-client-options)]
           (.setSSLSocketFactory builder ssl-socket-factory))))
     (let [^CloseableHttpClient client (when builder (.build builder))]
-      (make-solr-client clean-url client solr-major-version solr-client-options))))
+      (make-solr-client (:clean-url (get-url-details url)) client solr-major-version solr-client-options))))
 
 (defn- make-document [boost-map doc]
   (let [^SolrInputDocument sdoc (SolrInputDocument. (make-array String 0))]
