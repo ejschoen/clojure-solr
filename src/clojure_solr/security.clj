@@ -327,14 +327,16 @@
    "schemes" auth-schemes})
 
 (defn format-jwt-authentication
-  [issuers & {:keys [block-unknown] :or {block-unknown true}}]
-  {:pre [(every? #(and (or (get % "name") (get % :name))
+  [issuers & {:keys [block-unknown other-parameters] :or {block-unknown true}}]
+  {:pre [(or (nil? other-parameters) (map? other-parameters))
+         (every? #(and (or (get % "name") (get % :name))
                        (or (get % "clientId") (get % :clientId)))
                  issuers)]}
-  {"scheme" "bearer"
-   "blockUnknown" block-unknown
-   "class" "solr.JWTAuthPlugin"
-   "issuers" issuers})
+  (merge {"scheme" "bearer"
+          "blockUnknown" block-unknown
+          "class" "solr.JWTAuthPlugin"
+          "issuers" issuers}
+         other-parameters))
 
 (def scheme-by-class
   {"solr.BasicAuthPlugin" "basic"
@@ -381,9 +383,14 @@
 ;; If zookeeper is available at localhost:9181, this converts
 ;; standard basic auth to multi-auth with JWT
 #_(-> (get-security-json "localhost:9181")
-      (format-upgrade-to-multiauth [(format-jwt-auth [{:name "Entra ID"
-                                                       :wellKnownUrl "https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration"
-                                                       :clientId "252ce553-xxxx-xxxx-xxxx-xxxxxxxx72c" }])])
-      (add-permission -1 {:role "i2kreader"
+      (format-upgrade-to-multiauth [(format-jwt-authentication
+                                     [{:name "Entra ID"
+                                       :wellKnownUrl "https://login.microsoftonline.com/6bc2a1f4-xxxx-xxxx-xxxx-xxxxxxxxac92/v2.0/.well-known/openid-configuration"
+                                       :iss "https://sts.windows.net/6bc2a1f4-xxxx-xxxx-xxxx-xxxxxxxxac92/",
+
+                                       :clientId "252ce553-xxxx-xxxx-xxxx-xxxxxxxx772c"}]
+                                     :other-parameters {"rolesClaim" "roles"})])
+      (add-permission -1 {:role "solr:reader"
                           :collection "i2ksearch"
-                          :name "read"}))
+                          :path "/select"})
+      (put-security-json "localhost:9181"))
