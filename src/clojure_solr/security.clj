@@ -378,6 +378,32 @@
         (assoc "authentication" new-authentication)
         (assoc "authorization" new-authorization))))
 
+(defn format-downgrade-to-basicauth
+  [existing-security new-auth-schemes]
+  (let [existing-authorization (get existing-security "authorization")
+        existing-authentication (get existing-security "authentication")
+        new-authentication (cond (= (get existing-authentication "class") "solr.MultiAuthPlugin")
+                                 (if-let [basic-scheme (some #(and (= (get % "scheme" ) "basic") %) (get-in existing-security ["authentication" "schemes"]))]
+                                   (dissoc basic-scheme "scheme")
+                                   (throw (Exception. "No basic authentication scheme is configured for current multi auth")))
+                                 (= (get existing-authentication "class") "solr.BasicAuthPlugin")
+                                 existing-authentication
+                                 :else (throw (Exception. "Neither MultiAuth nor Basi
+                             existing-authentication
+                             (format-multi-authentication
+                              (concat [(assoc existing-authentication
+                                              "scheme"
+                                              (get scheme-by-class (get existing-authentication "class")))]
+                                      new-auth-schemes)))
+        new-authorization (if (= (get existing-authorization "class") "solr.MultiAuthRuleBasedAuthorizationPlugin")
+                            existing-authorization
+                            (format-multi-authorization existing-authorization
+                                                           (map #(get % "scheme")
+                                                                (get new-authentication "schemes"))))]
+    (-> existing-security
+        (assoc "authentication" new-authentication)
+        (assoc "authorization" new-authorization))))
+
 
 
 ;; If zookeeper is available at localhost:9181, this converts
