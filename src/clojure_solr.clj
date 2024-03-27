@@ -341,7 +341,7 @@
      :home-dir                  path to directory containing core files
      :core                      name of core to create"
   (let [solr-major-version (get-solr-major-version)
-        authenticator (get-authenticator url)
+        authenticator (if url (get-authenticator url))
         ^HttpClientBuilder builder (doto ^HttpClientBuilder (HttpClientBuilder/create)
                                        (.setDefaultCredentialsProvider basic-credentials-provider)
                                        (cond-> conn-manager (.setConnectionManager conn-manager))
@@ -1092,10 +1092,10 @@
                                                          (str/replace #"\*$" ""))})))
           query-results (:query-results-obj (meta result))
           ^SuggesterResponse suggester-response (when query-results (.getSuggesterResponse query-results))
-          ^Map suggestions (.getSuggestions suggester-response)
-          effective-suggester-name (cond (not-empty suggester-name)
-                                         suggester-name
-                                         :else (first (keys suggestions)))]
+          ^Map suggestions (when suggester-response (.getSuggestions suggester-response))
+          effective-suggester-name (cond (not-empty suggester-name) suggester-name
+                                         suggestions (first (keys suggestions))
+                                         :else nil)]
       (if (and query-results suggester-response)
         (vary-meta result assoc
                    :suggestions
