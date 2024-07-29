@@ -525,14 +525,10 @@
                         (map (fn [val]
                                (let [start-val (parse-range-value (.getValue val) (.getStart r))
                                      start-str (format-range-value start-val nil false)
-                                     end-val (cond date-range?
+                                     is-date-range? (or date-range? (instance? java.util.Date start-val))
+                                     end-val (cond is-date-range?
                                                    (tcoerce/to-date
                                                     (cheap-date-math-parser (tcoerce/from-date start-val) gap))
-                                                   #_(.parseMath (doto (DateMathParser.)
-                                                                 (.setNow
-                                                                  start-val #_(tcoerce/to-date
-                                                                               (tformat/parse query-result-date-time-parser start-val))))
-                                                               gap)
                                                    :else (+ start-val gap))
                                      end-str (format-range-value end-val nil false)]
                                  {:count (.getCount val)
