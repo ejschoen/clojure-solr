@@ -104,4 +104,6 @@
                                                   dom4j/dom4j
                                                   ]]
                                     [org.apache.solr/solr-solrj "6.6.6"]]}}
-  :repositories [["restlet" {:url "https://repo.spring.io/libs-release-remote"}]])
+  :repositories [["restlet" {:url "https://repo.spring.io/libs-release-remote"}]
+                 ["maven-restlet" {:url "https://maven.restlet.talend.com"}]]
+)
