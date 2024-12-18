@@ -422,25 +422,34 @@
                     (throw (IllegalStateException. "cheshire is not loaded"))))))))
 
 
+(defn solr-zk-client-factory
+  [zkhost timeout]
+  (let [client-constructors (.getConstructors org.apache.solr.common.cloud.SolrZkClient)]
+    (if (= 1 (count client-constructors))
+      (.build (doto (org.apache.solr.common.cloud.SolrZkClient$Builder.)
+                (.withUrl zkhost)
+                (.withTimeout timeout java.util.concurrent.TimeUnit/SECONDS))) 
+      (eval (list 'new 'org.apache.solr.common.cloud.SolrZkClient zkhost timeout )))))
+
 (defn upload-to-zookeeper
   [zkhost path bytes & {:keys [timeout] :or {timeout 60}}]
-  (let [client (SolrZkClient.  zkhost timeout)]
+  (with-open [client (solr-zk-client-factory  zkhost timeout)]
     (.makePath client path false true)
     (.setData client path bytes true)))
 
 (defn download-from-zookeeper
   [zkhost path & {:keys [timeout] :or {timeout 60}}]
-  (with-open [client (SolrZkClient.  zkhost timeout)]
+  (with-open [client (solr-zk-client-factory  zkhost timeout)]
     (.getData client path nil nil true)))
 
 (defn delete-from-zookeeper
   [zkhost path version & {:keys [timeout] :or {timeout 60}}]
-  (with-open [client (SolrZkClient.  zkhost timeout)]
+  (with-open [client (solr-zk-client-factory  zkhost timeout)]
     (.delete client path version true)))
 
 (defn get-collection-properties
   [zkhost collection & {:keys [timeout] :or {timeout 60}}]
-  (with-open [client (SolrZkClient.  zkhost timeout)]
+  (with-open [client (solr-zk-client-factory  zkhost timeout)]
     (if-let [parse-string (get-cheshire-parse-string)]
       (let [path (str org.apache.solr.common.cloud.ZkStateReader/COLLECTIONS_ZKNODE "/" collection)
             data (.getData client path nil nil true)
@@ -452,7 +461,7 @@
 
 (defn link-configset-to-collection
   [zkhost configset collection & {:keys [timeout] :or {timeout 60}}]
-  (with-open [client (SolrZkClient.  zkhost timeout)]
+  (with-open [client (solr-zk-client-factory  zkhost timeout)]
     (let [path (str org.apache.solr.common.cloud.ZkStateReader/COLLECTIONS_ZKNODE "/" collection)
           data (.getData client path nil nil true)
           props (into {} (.getProperties (ZkNodeProps/load data)))

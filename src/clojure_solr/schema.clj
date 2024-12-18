@@ -2,7 +2,11 @@
   (:require [clojure.string :as str])
   (:import (org.apache.solr.client.solrj.impl HttpSolrClient)
            (org.apache.solr.client.solrj.request.schema SchemaRequest$Fields SchemaRequest$DynamicFields)
+           (org.apache.solr.client.solrj.request.schema SchemaRequest$FieldType)
+           (org.apache.solr.client.solrj.request.schema SchemaRequest$FieldTypes)
            (org.apache.solr.client.solrj.response.schema SchemaResponse$FieldsResponse SchemaResponse$DynamicFieldsResponse)
+           (org.apache.solr.client.solrj.response.schema SchemaResponse$FieldTypeResponse FieldTypeRepresentation)
+           (org.apache.solr.client.solrj.response.schema SchemaResponse$FieldTypesResponse)
            (org.apache.solr.common SolrInputDocument)
            (org.apache.solr.client.solrj SolrQuery SolrRequest$METHOD)
            (org.apache.solr.common.params ModifiableSolrParams))
@@ -13,6 +17,20 @@
            [org.apache.http.util EntityUtils])
   (:require [clojure-solr :as solr]))
 
+
+(defn ^FieldTypeRepresentation get-field-type
+  [type-name]
+  (let [^SchemaResponse$FieldTypeResponse field-type-response (SchemaResponse$FieldTypeResponse.) 
+        generic-response (.request clojure-solr/*connection* (SchemaRequest$FieldType. type-name))] 
+    (when generic-response
+      (.setResponse field-type-response generic-response) 
+      (.getFieldType field-type-response))))
+
+(defn get-field-type-attributes
+  [type-name]
+  (let [^FieldTypeRepresentation rep (get-field-type type-name)]
+    (when rep
+      (into {} (.getAttributes rep)))))
 
 (defn get-schema
   "Get the complete schema for the current Solr connection (e.g., (with-connection (connect URL) (get-schema).
@@ -44,6 +62,27 @@
               :content-type content-type
               :body (EntityUtils/toString entity)})))))))
    
+(defn coerce-to-clojure
+  [solr-object]
+  (cond (instance? java.util.List solr-object)
+        (into []
+              (for [item solr-object]
+                (coerce-to-clojure item))) 
+        (instance? org.apache.solr.common.util.NamedList solr-object)
+        (into {}
+              (for [^java.util.Map$Entry entry (iterator-seq (.iterator solr-object))]
+                [(keyword (.getKey entry)) (coerce-to-clojure (.getValue entry))]
+                ))
+        :else solr-object))
+
+(defn get-field-types
+  []
+  (let [generic-response (.request solr/*connection* (SchemaRequest$FieldTypes.))
+        fields-response (SchemaResponse$FieldTypesResponse.)]
+    (.setResponse fields-response generic-response)
+    (for [field-type (.get (.getResponse fields-response) "fieldTypes") ]
+      (coerce-to-clojure field-type))))
+
 (defn get-schema-fields
   []
   (let [generic-response (.request solr/*connection* (SchemaRequest$Fields.))
@@ -62,6 +101,25 @@
            (into {} (map (fn [[k v]] [(keyword k) v]) field-schema)))
          (.getDynamicFields fields-response))))
 
+(defn get-unique-key
+  []
+  (.get (.request solr/*connection* (org.apache.solr.client.solrj.request.schema.SchemaRequest$UniqueKey.))
+                     "uniqueKey"))
+
+(defn get-copy-fields
+  []
+  (coerce-to-clojure (.get (.request solr/*connection* (org.apache.solr.client.solrj.request.schema.SchemaRequest$CopyFields.))
+                           "copyFields")))
+
+(defn get-schema-solrj
+  []
+  {:schema
+   {:name "solr" :version 1.1 
+    :uniqueKey (get-unique-key)
+    :fieldTypes (get-field-types)
+    :fields (get-schema-fields)
+    :dynamicFields (get-dynamic-schema-fields)
+    :copyFields (get-copy-fields) }})
 
 (defn luke-desc-to-traits
   [str key-info]

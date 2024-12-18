@@ -1,8 +1,5 @@
 (defproject cc.artifice/clojure-solr "4.8.0-SNAPSHOT"
-  :dependencies [;;[org.clojure/clojure "1.8.0"]
-                 ;;[org.apache.solr/solr-solrj "6.6.6"]
-                 ;;[org.apache.solr/solr-core "6.6.6" :exclusions [commons-fileupload joda-time]]
-                 [commons-io "2.6"]
+  :dependencies [[commons-io "2.6"]
                  [commons-fileupload "1.4" :exclusions [commons-io]]
                  [clj-time "0.11.0" :exclusions [org.clojure/clojure]]]
   :plugins [[lein-pprint "1.3.2"]]
@@ -20,7 +17,7 @@
                   [:plugin
                    [:groupId "org.owasp"]
                    [:artifactId "dependency-check-maven"]
-                   [:version "6.0.3"]
+                   [:version "11.1.0"]
                    [:configuration
                     [:scanSet
                      [:fileSet
@@ -45,9 +42,12 @@
              :1.8 {:dependencies [[org.clojure/clojure "1.8.0"]]}
              :1.9 {:dependencies [[org.clojure/clojure "1.9.0"]]}
              :1.10 {:dependencies [[org.clojure/clojure "1.10.1"]]}
+             :1.11 {:dependencies [[org.clojure/clojure "1.11.2"]]}
              :solr9 {:pom-addition [:properties ["solrj.major.version" "9"]]
-                     :dependencies [[org.apache.solr/solr-core "9.0.0" :exclusions [commons-fileupload joda-time]]
-                                    [org.apache.solr/solr-solrj "9.0.0"]]}
+                     :dependencies [[org.apache.solr/solr-core "9.7.0" :exclusions [commons-fileupload 
+                                                                                    joda-time
+                                                                                    org.apache.logging.log4j/log4j-slf4j2-impl]]
+                                    [org.apache.solr/solr-solrj "9.7.0"]]}
              :solr8 {:pom-addition [:properties ["solrj.major.version" "8"]]
                      :dependencies [[org.apache.solr/solr-core "8.6.3" :exclusions [commons-fileupload joda-time]]
                                     [org.apache.solr/solr-solrj "8.6.3"]]}

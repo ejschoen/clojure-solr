@@ -51,7 +51,8 @@
 
 (defn terms-facet
   "Create a facet command for term faceting"
-  [field & {:keys [prefix min-count sub-facets offset limit include-total?]}]
+  [field & {:keys [prefix min-count sub-facets offset limit include-total? facet-name]
+            :or {facet-name (name field)}}]
   (let [facet-map (doto (TermsFacetMap. field)
                     (cond-> include-total? (.includeTotalNumBuckets true)
                             offset (.setBucketOffset offset)
@@ -60,7 +61,7 @@
                             min-count (.setMinCount min-count)))]
     (when (not-empty sub-facets)
       (doseq [[field sub-facet-map] sub-facets]
-        (.withSubFacet facet-map (name field) sub-facet-map)))
+        (.withSubFacet facet-map facet-name sub-facet-map)))
     facet-map))
 
 (def ^:private facet-other-buckets
