@@ -422,14 +422,24 @@
                     (throw (IllegalStateException. "cheshire is not loaded"))))))))
 
 
-(defn solr-zk-client-factory
-  [zkhost timeout]
+(defn solr-zk-client-factory-builder
+  []
   (let [client-constructors (.getConstructors org.apache.solr.common.cloud.SolrZkClient)]
     (if (= 1 (count client-constructors))
-      (.build (doto (org.apache.solr.common.cloud.SolrZkClient$Builder.)
-                (.withUrl zkhost)
-                (.withTimeout timeout java.util.concurrent.TimeUnit/SECONDS))) 
-      (eval (list 'new 'org.apache.solr.common.cloud.SolrZkClient zkhost timeout )))))
+      ;; This is Solr 9.2.0 or later
+      (eval `(fn* ([zkhost# timeout#]
+                   (.build (doto (new org.apache.solr.common.cloud.SolrZkClient$Builder)
+                             (.withUrl zkhost#)
+                             (.withTimeout timeout# java.util.concurrent.TimeUnit/SECONDS)))))) 
+      (eval `(fn* ([zkhost# timeout#] (new org.apache.solr.common.cloud.SolrZkClient zkhost# timeout#)))))))
+
+(def solr-zk-client-factory-fn (atom nil))
+
+(defn solr-zk-client-factory
+  [zkhost timeout]
+  (when-not @solr-zk-client-factory-fn
+    (reset! solr-zk-client-factory-fn (solr-zk-client-factory-builder)))
+  (@solr-zk-client-factory-fn zkhost timeout))
 
 (defn upload-to-zookeeper
   [zkhost path bytes & {:keys [timeout] :or {timeout 60}}]
