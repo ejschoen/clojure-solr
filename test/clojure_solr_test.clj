@@ -56,6 +56,7 @@
       (System/setProperty "solr.solr.home" home-dir)
       (System/setProperty "solr.dist.dir" (str (System/getProperty "user.dir")
                                                "/test-files/dist"))
+      (System/setProperty "solr.ulog.dir" (str (get-solr-home-dir) "/data/log"))
       (let [[_ major minor :as version] (re-matches #"(\d+)\.(\d+)\..*" (get-solr-version))
             major (Integer/parseInt major)
             minor (Integer/parseInt minor)]

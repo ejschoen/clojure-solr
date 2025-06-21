@@ -41,8 +41,9 @@
              :dev-http {:dependencies [[clj-http "3.10.1"]
                                        [cheshire "5.9.0"]]}
              :attachable {:jvm-opts ["-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=4000"]}
-             :test {:dependencies [[cheshire "5.9.0"
-                                    [com.fasterxml.jackson.core/jackson-core ~jackson-version]]]}
+             :test {:dependencies [[cheshire "5.9.0"]
+                                   [com.fasterxml.jackson.core/jackson-core ~jackson-version]
+                                   [com.fasterxml.jackson.dataformat/jackson-dataformat-cbor ~jackson-version]]}
              :1.8 {:dependencies [[org.clojure/clojure "1.8.0"]]}
              :1.9 {:dependencies [[org.clojure/clojure "1.9.0"]]}
              :1.10 {:dependencies [[org.clojure/clojure "1.10.1"]]}

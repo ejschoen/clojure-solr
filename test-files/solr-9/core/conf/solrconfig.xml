@@ -39,7 +39,7 @@
   <updateHandler class="solr.DirectUpdateHandler2">
 
     <updateLog>
-      <str name="dir">${solr.core.dataDir}/log</str>
+      <str name="dir">${solr.ulog.dir}</str>
     </updateLog>
     <!-- A prefix of "solr." for class names is an alias that
          causes solr to search appropriate packages, including
@@ -613,13 +613,6 @@
     <queryResponseWriter name="custom" class="com.example.MyResponseWriter"/>
   -->
 
-  <!-- XSLT response writer transforms the XML output by any xslt file found
-       in Solr's conf/xslt directory.  Changes to xslt files are checked for
-       every xsltCacheLifetimeSeconds.  
-   -->
-  <queryResponseWriter name="xslt" class="solr.XSLTResponseWriter">
-    <int name="xsltCacheLifetimeSeconds">5</int>
-  </queryResponseWriter> 
     
   <!-- config for the admin interface --> 
   <admin>
