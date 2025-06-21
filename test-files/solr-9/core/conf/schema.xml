@@ -185,7 +185,6 @@
       </analyzer>
     </fieldType>
 
-
     <!-- Less flexible matching, but less false matches.  Probably not ideal for product names,
          but may be good for SKUs.  Can insert dashes in the wrong place and still match. -->
     <fieldType name="textTight" class="solr.TextField" positionIncrementGap="100" >
@@ -275,7 +274,7 @@
    <field name="_version_" type="slong" default="0" docValues="true" multiValued="false" indexed="true" stored="true"/>
    <field name="title" type="text" indexed="true" stored="true" />
    <field name="fulltext" type="text" indexed="true" stored="true" />
-   <field name="pagetext" type="text" indexed="true" stored="true" multiValued="true"/>
+   <field name="pagetext" type="text" indexed="true" stored="true" multiValued="true" termVectors="true" storeOffsetsWithPositions="true"/>
    <field name="word" type="text_ws" indexed="true" stored="true" />
    <field name="word_mv" type="text_spell" indexed="true" stored="true" multiValued="true"/>
    <field name="created" type="date" indexed="true" stored="true" omitNorms="true" />

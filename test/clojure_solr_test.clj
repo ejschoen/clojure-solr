@@ -56,7 +56,11 @@
       (System/setProperty "solr.solr.home" home-dir)
       (System/setProperty "solr.dist.dir" (str (System/getProperty "user.dir")
                                                "/test-files/dist"))
-      (System/setProperty "solr.ulog.dir" (str (get-solr-home-dir) "/data/log"))
+      (let [ulog-dir (str (System/getProperty "user.dir")
+                          "/"
+                          (get-solr-home-dir)
+                          "/data/log")]
+        (System/setProperty "solr.ulog.dir" ulog-dir))
       (let [[_ major minor :as version] (re-matches #"(\d+)\.(\d+)\..*" (get-solr-version))
             major (Integer/parseInt major)
             minor (Integer/parseInt minor)]
@@ -65,9 +69,10 @@
               ;; https://issues.apache.org/jira/browse/SOLR-12858
               (do (println "Using get as default method due to issue SOLR-12858")
                   (set-default-method! :get))
-              (= major 8)
-              (if (.exists (io/as-file "test-files/solr-8/data/index/write.lock"))
-                (.delete (io/as-file "test-files/solr-8/data/index/write.lock")))
+              (>= major 8)
+              (let [write-lock (str "test-files/solr-" major "/data/index/write.lock")]
+                (if (.exists (io/as-file write-lock))
+                  (.delete (io/as-file write-lock))))
               ))
       (with-connection (connect nil nil 
                                 {:type EmbeddedSolrServer
@@ -677,3 +682,31 @@
       (is (= 2 (count (:files (first result)))))
       (is (= #{"doc10!1" "doc10!2"} (set (map :id (:files (first result))))))
      )))
+
+(deftest test-highlighting
+  (when (>= (get-solr-major-version) 8)
+    (add-document! {:id "doc10"
+                    :type "Dataset"
+                    :pagetext ["Nothing here"]
+                    :files [{:id "doc10!1"
+                             :type "LAS File"
+                             :pagetext ["A LAS File"]}
+                            {:id "doc10!2"
+                             :type "DLIS File"
+                             :pagetext ["A DLIS File"]}]})
+    (commit!)
+    (let [result (search* "File"
+                          {:df "pagetext"
+                           :qf "pagetext type"
+                           :defType "edismax"
+                           :hl.fl "pagetext type"
+                           :hl "true"
+                           :hl.method "unified"
+                           :hl.fragsize 0
+                           :hl.snippets 4
+                           :hl.tag.pre "<strong>"
+                           :hl.tag.post "</strong>"})]
+      (println result)
+      (clojure.pprint/pprint (meta result)))))
+    
+  
