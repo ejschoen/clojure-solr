@@ -19,7 +19,7 @@
 (defmethod make-solr-client EmbeddedSolrServer [_  _ major-version solr-client-options]
   (let [cont-expr (case major-version
                     (6 7) `(CoreContainer.)
-                    8 (let [home-dir (:home-dir solr-client-options)]
+                    (8 9) (let [home-dir (:home-dir solr-client-options)]
                         `(CoreContainer. (.getPath (java.nio.file.FileSystems/getDefault)
                                                    ~home-dir
                                                    (make-array String 0))
@@ -46,27 +46,33 @@
                (try (clojure.java.io/delete-file f) (catch Exception _)))]
     (func func (clojure.java.io/file fname))))
 
+(def test-lock (Object.))
+
 (defn solr-server-fixture
   [f]
-  (let [home-dir (get-solr-home-dir)]
-    (delete-recursively (str home-dir "/data"))
-    (System/setProperty "solr.solr.home" home-dir)
-    (System/setProperty "solr.dist.dir" (str (System/getProperty "user.dir")
-                                             "/test-files/dist"))
-    (let [[_ major minor :as version] (re-matches #"(\d+)\.(\d+)\..*" (get-solr-version))
-          major (Integer/parseInt major)
-          minor (Integer/parseInt minor)]
-      (println (format "This is solr version %s" (first version)))
-      (when (and (= major 7) (>= minor 4))
-        ;; https://issues.apache.org/jira/browse/SOLR-12858
-        (println "Using get as default method due to issue SOLR-12858")
-        (set-default-method! :get)
-        ))
-    (with-connection (connect nil nil 
-                              {:type EmbeddedSolrServer
-                               :core "clojure-solr"
-                               :home-dir (get-solr-home-dir)}) 
-      (f))))
+  (locking test-lock
+    (let [home-dir (get-solr-home-dir)]
+      (delete-recursively (str home-dir "/data"))
+      (System/setProperty "solr.solr.home" home-dir)
+      (System/setProperty "solr.dist.dir" (str (System/getProperty "user.dir")
+                                               "/test-files/dist"))
+      (let [[_ major minor :as version] (re-matches #"(\d+)\.(\d+)\..*" (get-solr-version))
+            major (Integer/parseInt major)
+            minor (Integer/parseInt minor)]
+        (println (format "This is solr version %s" (first version)))
+        (cond (and (= major 7) (>= minor 4))
+              ;; https://issues.apache.org/jira/browse/SOLR-12858
+              (do (println "Using get as default method due to issue SOLR-12858")
+                  (set-default-method! :get))
+              (= major 8)
+              (if (.exists (io/as-file "test-files/solr-8/data/index/write.lock"))
+                (.delete (io/as-file "test-files/solr-8/data/index/write.lock")))
+              ))
+      (with-connection (connect nil nil 
+                                {:type EmbeddedSolrServer
+                                 :core "clojure-solr"
+                                 :home-dir (get-solr-home-dir)}) 
+        (f)))))
 
 (use-fixtures :each solr-server-fixture)
 

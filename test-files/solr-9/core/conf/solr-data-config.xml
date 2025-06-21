@@ -1,0 +1,22 @@
+<dataConfig>
+  <xi:include href="mysql.xml" xmlns:xi="http://www.w3.org/2001/XInclude" />
+  <document>
+    <entity name="doc"
+            query="select d.id, d.source, d.provenance, d.created, d.updated, d.title, d.fulltext, d.numeric, t.name from docs as d, types as t where t.id = d.types_id"
+            deltaImportQuery="select d.id, d.created, d.updated, d.title, d.fulltext, d.numeric, t.name from docs as d, types as t where t.id = d.types_id and id = '${dataimporter.delta.id}'"
+            deltaQuery="select d.id from docs as d where d.updated > '${dataimporter.last_index_time}'">
+      <field column="id" name="id" />
+      <field column="title" name="title" />
+      <field column="fulltext" name="fulltext" />
+      <field column="created" name="created" />
+      <field column="updated" name="updated" />
+      <field column="source" name="source" />
+      <field column="provenance" name="provenance" />
+      <field column="name" name="type" />
+      <field column="numeric" name="numeric" />
+      <entity name="doc_terms" query="select concat(v.name, '/', t.name) as terms_string from terms as t, vocabs as v, docs_terms as dt where dt.docs_id = ${doc.id} and t.id = dt.terms_id and t.vocabs_id = v.id">
+        <field column="terms_string" name="terms" />
+      </entity>
+    </entity>
+  </document>
+</dataConfig>
