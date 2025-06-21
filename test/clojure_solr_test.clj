@@ -706,7 +706,5 @@
                            :hl.snippets 4
                            :hl.tag.pre "<strong>"
                            :hl.tag.post "</strong>"})]
-      (println result)
-      (clojure.pprint/pprint (meta result)))))
-    
-  
+      (is (= (get (meta result) :highlighting)
+             {"doc10!1" {"pagetext" ["A LAS <strong>File</strong>"]}, "doc10!2" {"pagetext" ["A DLIS <strong>File</strong>"]}})))))
