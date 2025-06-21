@@ -1,3 +1,5 @@
+(def jackson-version "2.18.0")
+
 (defproject cc.artifice/clojure-solr "4.8.0-SNAPSHOT"
   :dependencies [[commons-io "2.6"]
                  [commons-fileupload "1.4" :exclusions [commons-io]]
@@ -29,6 +31,7 @@
                     [:reportSet
                      [:reports
                       [:report "aggregate"]]]]]]]
+  :managed-dependencies [[com.fasterxml.jackson.core/jackson-core ~jackson-version]]
   :profiles {:dev {:dependencies [[clj-http "3.10.1" :exclusions [org.clojure/tools.reader
                                                                   org.apache.httpcomponents/httpmime
                                                                   org.apache.httpcomponents/httpcore
@@ -38,7 +41,8 @@
              :dev-http {:dependencies [[clj-http "3.10.1"]
                                        [cheshire "5.9.0"]]}
              :attachable {:jvm-opts ["-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=4000"]}
-             :test {:dependencies [[cheshire "5.9.0"]]}
+             :test {:dependencies [[cheshire "5.9.0"
+                                    [com.fasterxml.jackson.core/jackson-core ~jackson-version]]]}
              :1.8 {:dependencies [[org.clojure/clojure "1.8.0"]]}
              :1.9 {:dependencies [[org.clojure/clojure "1.9.0"]]}
              :1.10 {:dependencies [[org.clojure/clojure "1.10.1"]]}
@@ -49,8 +53,8 @@
                                                                                     org.apache.logging.log4j/log4j-slf4j2-impl]]
                                     [org.apache.solr/solr-solrj "9.7.0"]]}
              :solr8 {:pom-addition [:properties ["solrj.major.version" "8"]]
-                     :dependencies [[org.apache.solr/solr-core "8.6.3" :exclusions [commons-fileupload joda-time]]
-                                    [org.apache.solr/solr-solrj "8.6.3"]]}
+                     :dependencies [[org.apache.solr/solr-core "8.11.4" :exclusions [commons-fileupload joda-time]]
+                                    [org.apache.solr/solr-solrj "8.11.4"]]}
              :solr7 {:pom-addition [:properties ["solrj.major.version" "7"]]
                      :dependencies [[org.apache.solr/solr-core "7.7.3"
                                      :exclusions [commons-fileupload joda-time
