@@ -431,7 +431,8 @@
                    (.build (doto (new org.apache.solr.common.cloud.SolrZkClient$Builder)
                              (.withUrl zkhost#)
                              (.withTimeout timeout# java.util.concurrent.TimeUnit/SECONDS)))))) 
-      (eval `(fn* ([zkhost# timeout#] (new org.apache.solr.common.cloud.SolrZkClient zkhost# timeout#)))))))
+      (eval `(fn* ([zkhost# timeout#] (new org.apache.solr.common.cloud.SolrZkClient zkhost#
+                                           (* 1000 timeout#))))))))
 
 (def solr-zk-client-factory-fn (atom nil))
 
