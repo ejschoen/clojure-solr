@@ -1,6 +1,6 @@
 (def jackson-version "2.18.0")
 
-(defproject cc.artifice/clojure-solr "4.8.0-SNAPSHOT"
+(defproject cc.artifice/clojure-solr "4.9.0-SNAPSHOT"
   :dependencies [[commons-io "2.6"]
                  [commons-fileupload "1.4" :exclusions [commons-io]]
                  [clj-time "0.11.0" :exclusions [org.clojure/clojure]]]

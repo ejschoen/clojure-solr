@@ -15,6 +15,7 @@
            (org.apache.http.impl.client BasicCredentialsProvider HttpClientBuilder CloseableHttpClient)
            (org.apache.http.protocol HttpContext HttpCoreContext)
            (org.apache.http.ssl SSLContexts SSLContextBuilder)
+           (org.apache.http.conn HttpClientConnectionManager)
            (javax.net.ssl SSLContext)
            (org.apache.http.conn.ssl SSLConnectionSocketFactory NoopHostnameVerifier TrustSelfSignedStrategy)
            (org.apache.solr.client.solrj SolrQuery SolrRequest$METHOD SolrClient)
@@ -34,12 +35,19 @@
 
 (defonce ^:private url-details (atom {}))
 (defonce ^{:private true :tag BasicCredentialsProvider}  basic-credentials-provider (BasicCredentialsProvider.))
+(defonce ^:private default-connection-manager (atom nil))
 
 (declare ^{:dynamic true :tag SolrClient} *connection*)
 
 (def ^:dynamic *trace-fn* nil)
 
 (declare make-param)
+
+(defn set-default-connection-manager [^HttpClientConnectionManager conn-mgr]
+  (reset! default-connection-manager conn-mgr))
+
+(defn get-default-connection-manager []
+  @default-connection-manager)
 
 (def default-method (atom :post))
 
@@ -345,6 +353,8 @@
         ^HttpClientBuilder builder (doto ^HttpClientBuilder (HttpClientBuilder/create)
                                        (.setDefaultCredentialsProvider basic-credentials-provider)
                                        (cond-> conn-manager (.setConnectionManager conn-manager))
+                                       (cond-> (and (not conn-manager) @default-connection-manager)
+                                         (.setConnectionManager @default-connection-manager))
                                        (cond-> (and (:socket-timeout solr-client-options)
                                                     (< solr-major-version 7))
                                          (.setDefaultSocketConfig (let [scbuilder
