@@ -1370,3 +1370,21 @@
        (do ~@body)
        (finally (.close ^SolrClient *connection*)))))
 
+(defmacro with-opened-connection
+  "Binds *connection* to conn for the scope of body, but does NOT close
+   it on exit. Use for long-lived connections managed by the caller."
+  [conn & body]
+  `(binding [*connection* ~conn]
+     ~@body))
+
+(defn register-shutdown-hook!
+  "Registers a JVM shutdown hook that drains and closes the given SolrClient.
+   For ConcurrentUpdateSolrClient, calls blockUntilFinished() before close()."
+  [^SolrClient conn]
+  (.addShutdownHook (Runtime/getRuntime)
+    (Thread.
+      (fn []
+        (when (instance? ConcurrentUpdateSolrClient conn)
+          (.blockUntilFinished ^ConcurrentUpdateSolrClient conn))
+        (.close conn)))))
+

@@ -708,3 +708,19 @@
                            :hl.tag.post "</strong>"})]
       (is (= (get (meta result) :highlighting)
              {"doc10!1" {"pagetext" ["A LAS <strong>File</strong>"]}, "doc10!2" {"pagetext" ["A DLIS <strong>File</strong>"]}})))))
+
+(deftest test-with-opened-connection
+  (let [conn *connection*]
+    ;; Use the connection once through with-opened-connection
+    (with-opened-connection conn
+      (add-document! {:id "opened-1" :type "pdf" :title "opened test" :fulltext "opened fulltext"})
+      (commit!))
+    ;; Use the same connection again — proves it was NOT closed
+    (with-opened-connection conn
+      (let [result (search "id:opened-1" :df "fulltext")]
+        (is (= 1 (count result)))
+        (is (= "opened test" (:title (first result))))))))
+
+(deftest test-register-shutdown-hook-no-throw
+  ;; Just verify it doesn't throw; we can't easily trigger the hook in a test
+  (is (nil? (register-shutdown-hook! *connection*))))
