@@ -458,6 +458,86 @@
   (with-open [client (solr-zk-client-factory  zkhost timeout)]
     (.delete client path version true)))
 
+(defn list-zk-children
+  "List the child znodes at a given path in ZooKeeper.
+   Returns a java.util.List of child node names (not full paths)."
+  [zkhost path & {:keys [timeout] :or {timeout 60}}]
+  (with-open [client (solr-zk-client-factory zkhost timeout)]
+    (vec (.getChildren client path nil true))))
+
+(defn zk-path-exists?
+  "Check if a path exists in ZooKeeper."
+  [zkhost path & {:keys [timeout] :or {timeout 60}}]
+  (with-open [client (solr-zk-client-factory zkhost timeout)]
+    (.exists client path true)))
+
+(defn- copy-zk-tree
+  "Recursively copy a ZK tree from source to target.
+   progress-fn, if provided, is called with each path copied."
+  [source-zkhost target-zkhost path timeout progress-fn]
+  (let [data (try (download-from-zookeeper source-zkhost path :timeout timeout)
+               (catch Exception _ nil))
+        children (try (list-zk-children source-zkhost path :timeout timeout)
+                   (catch Exception _ []))]
+    (when data
+      (upload-to-zookeeper target-zkhost path data :timeout timeout)
+      (when progress-fn (progress-fn path)))
+    (when (and (nil? data) (seq children))
+      ;; Create the parent znode even if it has no data
+      (upload-to-zookeeper target-zkhost path (byte-array 0) :timeout timeout))
+    (doseq [child children]
+      (copy-zk-tree source-zkhost target-zkhost
+                    (str path "/" child) timeout progress-fn))))
+
+(defn clone-zookeeper
+  "Clone Solr's ZooKeeper state from a source ZK to a target ZK.
+   Copies configsets, collection state, and security.json.
+
+   source-zkhost - connection string for the source ZK (e.g., '127.0.0.1:9983')
+   target-zkhost - connection string for the target ZK (e.g., 'localhost:2181')
+
+   Options:
+     :timeout     - ZK client timeout in seconds (default: 60)
+     :progress-fn - called with each ZK path as it's copied (e.g., println)
+     :include     - set of keywords for what to copy (default: #{:configsets :collections :security})
+
+   Returns a map summarizing what was copied."
+  [source-zkhost target-zkhost
+   & {:keys [timeout progress-fn include]
+      :or {timeout 60
+           include #{:configsets :collections :security}}}]
+  (let [report (atom {:configsets [] :collections [] :security false})]
+
+    ;; Copy configsets
+    (when (:configsets include)
+      (let [configsets (try (list-zk-children source-zkhost "/configs" :timeout timeout)
+                         (catch Exception _ []))]
+        (doseq [cs configsets]
+          (when progress-fn (progress-fn (str "Copying configset: " cs)))
+          (copy-zk-tree source-zkhost target-zkhost
+                        (str "/configs/" cs) timeout progress-fn)
+          (swap! report update :configsets conj cs))))
+
+    ;; Copy collection state
+    (when (:collections include)
+      (let [collections (try (list-zk-children source-zkhost "/collections" :timeout timeout)
+                          (catch Exception _ []))]
+        (doseq [coll collections]
+          (when progress-fn (progress-fn (str "Copying collection state: " coll)))
+          (copy-zk-tree source-zkhost target-zkhost
+                        (str "/collections/" coll) timeout progress-fn)
+          (swap! report update :collections conj coll))))
+
+    ;; Copy security.json
+    (when (:security include)
+      (when (zk-path-exists? source-zkhost "/security.json" :timeout timeout)
+        (when progress-fn (progress-fn "Copying security.json"))
+        (let [data (download-from-zookeeper source-zkhost "/security.json" :timeout timeout)]
+          (upload-to-zookeeper target-zkhost "/security.json" data :timeout timeout)
+          (swap! report assoc :security true))))
+
+    @report))
+
 (defn get-collection-properties
   [zkhost collection & {:keys [timeout] :or {timeout 60}}]
   (with-open [client (solr-zk-client-factory  zkhost timeout)]

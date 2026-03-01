@@ -4,9 +4,12 @@
   (:require [clj-time.core :as t])
   (:require [clj-time.format :as tformat])
   (:require [clj-time.coerce :as tcoerce])
-  (:import (java.net URI)
+  (:import (java.io File FileOutputStream)
+           (java.net URI)
            (java.util Base64 HashMap List ArrayList Map)
            (java.nio.charset Charset)
+           (java.nio.file Files)
+           (java.nio.file.attribute PosixFilePermissions FileAttribute)
            (org.apache.http HttpRequest HttpRequestInterceptor HttpHeaders)
            (org.apache.http.auth AuthState AuthScope UsernamePasswordCredentials)
            (org.apache.http.client.protocol HttpClientContext)
@@ -20,7 +23,8 @@
            (org.apache.http.conn.ssl SSLConnectionSocketFactory NoopHostnameVerifier TrustSelfSignedStrategy)
            (org.apache.solr.client.solrj SolrQuery SolrRequest$METHOD SolrClient)
            (org.apache.solr.client.solrj.impl HttpSolrClient HttpSolrClient$Builder HttpClientUtil
-                                              ConcurrentUpdateSolrClient ConcurrentUpdateSolrClient$Builder)
+                                              ConcurrentUpdateSolrClient ConcurrentUpdateSolrClient$Builder
+                                              Krb5HttpClientBuilder)
            (java.util.jar Manifest)
            (java.time.temporal ChronoUnit)
            (org.apache.solr.client.solrj.response QueryResponse
@@ -234,10 +238,55 @@
 
 (defonce authenticators (atom {}))
 
+(defonce ^:private kerberos-config (atom nil))
+
 (defn clear-credentials
   "Remove *all* basic authentication credentials for all Solr URIs."
   []
   (reset! authenticators {}))
+
+(defn- write-secure-temp-file
+  "Write byte array content to a temp file with restrictive permissions.
+   Returns the java.io.File object."
+  [^bytes content ^String prefix ^String suffix]
+  (let [path (try
+               (let [attrs (into-array FileAttribute
+                             [(PosixFilePermissions/asFileAttribute
+                               (PosixFilePermissions/fromString "rw-------"))])]
+                 (Files/createTempFile prefix suffix attrs))
+               (catch UnsupportedOperationException _
+                 (let [p (Files/createTempFile prefix suffix (make-array FileAttribute 0))
+                       f (.toFile p)]
+                   (.setReadable f false false)
+                   (.setReadable f true true)
+                   (.setWritable f false false)
+                   (.setWritable f true true)
+                   p)))
+        file (.toFile path)]
+    (with-open [os (FileOutputStream. file)]
+      (.write os content))
+    (.deleteOnExit file)
+    file))
+
+(defn- delete-file-quietly
+  "Delete a file, ignoring errors if it does not exist."
+  [^File f]
+  (when (and f (.exists f))
+    (.delete f)))
+
+(defn- generate-jaas-config
+  "Generate JAAS configuration content for Kerberos authentication."
+  [^String keytab-path ^String principal ^String entry-name
+   use-ticket-cache debug]
+  (str entry-name " {\n"
+       "  com.sun.security.auth.module.Krb5LoginModule required\n"
+       "  useKeyTab=true\n"
+       "  keyTab=\"" keytab-path "\"\n"
+       "  storeKey=true\n"
+       "  useTicketCache=" (if use-ticket-cache "true" "false") "\n"
+       "  debug=" (if debug "true" "false") "\n"
+       "  principal=\"" principal "\";\n"
+       "};\n"))
 
 (extend-protocol SolrAuthenticatorLookup
   String
@@ -276,6 +325,84 @@
                       ^UsernamePasswordCredentials (make-basic-credentials name password))
      (set-credentials uri (SolrBasicAuthentication. provider) ) )))
 
+(defn kerberos-configured?
+  "Returns true if Kerberos authentication has been configured via set-kerberos-credentials."
+  []
+  (some? @kerberos-config))
+
+(defn clear-kerberos-credentials
+  "Remove Kerberos authentication configuration, clean up temp files,
+   and restore default HttpClientUtil builder."
+  []
+  (when-let [config @kerberos-config]
+    (doseq [f (:temp-files config)]
+      (delete-file-quietly f))
+    (System/clearProperty "java.security.krb5.conf")
+    (System/clearProperty "java.security.auth.login.config")
+    (reset! kerberos-config nil)))
+
+(defn set-kerberos-credentials
+  "Configure JVM-wide Kerberos (SPNEGO) authentication for Solr connections.
+   Sets system properties and configures JAAS for SolrJ's Krb5HttpClientBuilder.
+
+   Arguments:
+     principal    - Kerberos principal string, e.g., 'HTTP/solr-host@EXAMPLE.COM'
+     krb5-conf    - Kerberos configuration: a byte array containing krb5.conf content,
+                    or a String path or java.io.File pointing to an existing krb5.conf
+     keytab       - Kerberos keytab: a byte array containing keytab content,
+                    or a String path or java.io.File pointing to an existing keytab
+
+   Options (keyword arguments):
+     :jaas-entry-name  - JAAS login context name (default: 'Client')
+     :use-ticket-cache - whether to use the ticket cache (default: false)
+     :debug            - enable Kerberos debug output (default: false)
+
+   Note: Kerberos authentication is JVM-global. Only one configuration can be
+   active at a time. Calling this function again will replace the previous
+   configuration (cleaning up any temp files from the previous call).
+
+   Use clear-kerberos-credentials to remove the configuration and clean up."
+  [principal krb5-conf keytab & {:keys [jaas-entry-name use-ticket-cache debug]
+                                  :or {jaas-entry-name "Client"
+                                       use-ticket-cache false
+                                       debug false}}]
+  ;; Clean up any previous configuration
+  (clear-kerberos-credentials)
+  (let [krb5-conf-file (cond
+                         (bytes? krb5-conf)
+                         (write-secure-temp-file krb5-conf "clojure-solr-krb5-" ".conf")
+                         (instance? File krb5-conf)
+                         krb5-conf
+                         (string? krb5-conf)
+                         (File. ^String krb5-conf))
+        keytab-file (cond
+                      (bytes? keytab)
+                      (write-secure-temp-file keytab "clojure-solr-keytab-" ".keytab")
+                      (instance? File keytab)
+                      keytab
+                      (string? keytab)
+                      (File. ^String keytab))
+        jaas-content (generate-jaas-config (.getAbsolutePath keytab-file)
+                                           principal
+                                           jaas-entry-name
+                                           use-ticket-cache
+                                           debug)
+        jaas-conf-file (write-secure-temp-file (.getBytes jaas-content "UTF-8")
+                                                "clojure-solr-jaas-" ".conf")]
+    ;; Set system properties required by Java's Kerberos stack
+    (System/setProperty "java.security.krb5.conf" (.getAbsolutePath krb5-conf-file))
+    (System/setProperty "java.security.auth.login.config" (.getAbsolutePath jaas-conf-file))
+    ;; Configure SolrJ to use Kerberos-aware HTTP client builder
+    (HttpClientUtil/setHttpClientBuilder (.getBuilder (Krb5HttpClientBuilder.)))
+    ;; Store configuration in atom (track temp files for cleanup)
+    (reset! kerberos-config
+            {:principal principal
+             :krb5-conf-file krb5-conf-file
+             :keytab-file keytab-file
+             :jaas-conf-file jaas-conf-file
+             :temp-files (cond-> [jaas-conf-file]
+                           (bytes? krb5-conf) (conj krb5-conf-file)
+                           (bytes? keytab) (conj keytab-file))})))
 
 
 (defmulti make-solr-client (fn [url http-client solr-major-version solr-client-options] (:type solr-client-options)))
@@ -283,7 +410,7 @@
 (defmethod make-solr-client :default [url http-client solr-major-version solr-client-options]
   (.build
    (doto (HttpSolrClient$Builder. url)
-     (.withHttpClient http-client)
+     (cond-> http-client (.withHttpClient http-client))
      (cond-> (#{true false} (:allow-compression solr-client-options))
        (.allowCompression (:allow-compression solr-client-options)))
      (cond-> (not-empty (:kerberos-delegation-token solr-client-options))
@@ -298,7 +425,7 @@
 (defmethod  make-solr-client ConcurrentUpdateSolrClient [url http-client solr-major-version solr-client-options]
   (.build
    (doto (ConcurrentUpdateSolrClient$Builder. url)
-     (.withHttpClient http-client)
+     (cond-> http-client (.withHttpClient http-client))
      (cond-> (and (:queue-size solr-client-options)
                   (>= solr-major-version 7))
        (.withQueueSize (:queue-size solr-client-options)))
@@ -330,8 +457,13 @@
    a provided connection-manager, such as PoolingHttpClientConnectionManager,
    for situations where Solr's default connection manager cannot keep up
    with demand.
+   When Kerberos authentication has been configured via set-kerberos-credentials,
+   connections will automatically use SPNEGO negotiation. The Kerberos-aware HTTP
+   client is created by SolrJ's HttpClientUtil using the Krb5HttpClientBuilder.
+   Per-host basic authentication (set-credentials) takes precedence over Kerberos
+   for specific hosts where both are configured.
    solr-client-options is a map with:
-     :type                      type of Solr client to create: HttpSolrClient (default), 
+     :type                      type of Solr client to create: HttpSolrClient (default),
                                 ConcurrentUpdateSolrClient, EmbeddedSolrServer (ie, for testing)
    for HttpSolrClient:
      :ssl-trust-store           File object pointing trust store .p12 file, or :self-signed
@@ -349,32 +481,34 @@
      :home-dir                  path to directory containing core files
      :core                      name of core to create"
   (let [solr-major-version (get-solr-major-version)
-        authenticator (if url (get-authenticator url))
-        ^HttpClientBuilder builder (doto ^HttpClientBuilder (HttpClientBuilder/create)
-                                       (.setDefaultCredentialsProvider basic-credentials-provider)
-                                       (cond-> conn-manager (.setConnectionManager conn-manager))
-                                       (cond-> (and (not conn-manager) @default-connection-manager)
-                                         (.setConnectionManager @default-connection-manager))
-                                       (cond-> (and (:socket-timeout solr-client-options)
-                                                    (< solr-major-version 7))
-                                         (.setDefaultSocketConfig (let [scbuilder
-                                                                        (doto ^SocketConfig$Builder (SocketConfig/custom)
-                                                                          (.setSoTimeout
-                                                                           (int (:socket-timeout
-                                                                                 solr-client-options))))]
-                                                                    (.build scbuilder))))
-                                       (cond-> authenticator
-                                         (.addInterceptorFirst 
-                                          (reify 
-                                              HttpRequestInterceptor
-                                            (^void process [this ^HttpRequest request ^HttpContext context]
-                                             (add-authentication authenticator request context))))))]
-    (when builder
-      (when (:ssl-trust-store solr-client-options)
-        (when-let [ssl-socket-factory (build-connection-socket-factory solr-client-options)]
-          (.setSSLSocketFactory builder ssl-socket-factory))))
-    (let [^CloseableHttpClient client (when builder (.build builder))]
-      (make-solr-client (:clean-url (get-url-details url)) client solr-major-version solr-client-options))))
+        authenticator (when url (get-authenticator url))
+        use-kerberos (and (kerberos-configured?) (nil? authenticator))
+        ^CloseableHttpClient client
+        (when-not use-kerberos
+          (let [^HttpClientBuilder builder (doto ^HttpClientBuilder (HttpClientBuilder/create)
+                                             (.setDefaultCredentialsProvider basic-credentials-provider)
+                                             (cond-> conn-manager (.setConnectionManager conn-manager))
+                                             (cond-> (and (not conn-manager) @default-connection-manager)
+                                               (.setConnectionManager @default-connection-manager))
+                                             (cond-> (and (:socket-timeout solr-client-options)
+                                                          (< solr-major-version 7))
+                                               (.setDefaultSocketConfig (let [scbuilder
+                                                                              (doto ^SocketConfig$Builder (SocketConfig/custom)
+                                                                                (.setSoTimeout
+                                                                                 (int (:socket-timeout
+                                                                                       solr-client-options))))]
+                                                                          (.build scbuilder))))
+                                             (cond-> authenticator
+                                               (.addInterceptorFirst
+                                                (reify
+                                                    HttpRequestInterceptor
+                                                  (^void process [this ^HttpRequest request ^HttpContext context]
+                                                   (add-authentication authenticator request context))))))]
+            (when (:ssl-trust-store solr-client-options)
+              (when-let [ssl-socket-factory (build-connection-socket-factory solr-client-options)]
+                (.setSSLSocketFactory builder ssl-socket-factory)))
+            (.build builder)))]
+    (make-solr-client (:clean-url (get-url-details url)) client solr-major-version solr-client-options)))
 
 (defn- make-document [boost-map doc]
   (let [^SolrInputDocument sdoc (SolrInputDocument. (make-array String 0))]

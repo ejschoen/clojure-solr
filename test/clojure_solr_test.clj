@@ -724,3 +724,62 @@
 (deftest test-register-shutdown-hook-no-throw
   ;; Just verify it doesn't throw; we can't easily trigger the hook in a test
   (is (nil? (register-shutdown-hook! *connection*))))
+
+;; Kerberos configuration lifecycle tests (no KDC required)
+
+(deftest test-kerberos-credentials-lifecycle
+  (let [krb5-content (.getBytes "[libdefaults]\n  default_realm = TEST.REALM\n" "UTF-8")
+        keytab-content (byte-array [0x05 0x02 0x00])]
+    (try
+      (set-kerberos-credentials "user@TEST.REALM" krb5-content keytab-content)
+      (is (kerberos-configured?))
+      (is (not (nil? (System/getProperty "java.security.krb5.conf"))))
+      (is (not (nil? (System/getProperty "java.security.auth.login.config"))))
+      ;; Verify JAAS file contains the principal and expected settings
+      (let [jaas-path (System/getProperty "java.security.auth.login.config")
+            jaas-content (slurp jaas-path)]
+        (is (.contains jaas-content "user@TEST.REALM"))
+        (is (.contains jaas-content "useKeyTab=true"))
+        (is (.contains jaas-content "Client {")))
+      ;; Verify krb5.conf was written
+      (let [krb5-path (System/getProperty "java.security.krb5.conf")
+            krb5-written (slurp krb5-path)]
+        (is (.contains krb5-written "default_realm = TEST.REALM")))
+      (finally
+        (clear-kerberos-credentials)
+        (is (not (kerberos-configured?)))
+        (is (nil? (System/getProperty "java.security.krb5.conf")))
+        (is (nil? (System/getProperty "java.security.auth.login.config")))))))
+
+(deftest test-kerberos-with-file-paths
+  (let [krb5-file (java.io.File/createTempFile "test-krb5-" ".conf")
+        keytab-file (java.io.File/createTempFile "test-keytab-" ".keytab")]
+    (try
+      (spit krb5-file "[libdefaults]\n  default_realm = FILE.REALM\n")
+      (spit keytab-file "dummy-keytab")
+      (set-kerberos-credentials "user@FILE.REALM"
+                                 (.getAbsolutePath krb5-file)
+                                 (.getAbsolutePath keytab-file))
+      (is (kerberos-configured?))
+      (is (= (.getAbsolutePath krb5-file)
+             (System/getProperty "java.security.krb5.conf")))
+      (finally
+        (clear-kerberos-credentials)
+        (.delete krb5-file)
+        (.delete keytab-file)))))
+
+(deftest test-kerberos-reconfiguration
+  (let [content1 (.getBytes "[libdefaults]\n  default_realm = REALM1\n" "UTF-8")
+        content2 (.getBytes "[libdefaults]\n  default_realm = REALM2\n" "UTF-8")
+        keytab (.getBytes "dummy-keytab" "UTF-8")]
+    (try
+      (set-kerberos-credentials "user@REALM1" content1 keytab)
+      (let [first-jaas-path (System/getProperty "java.security.auth.login.config")]
+        (set-kerberos-credentials "user@REALM2" content2 keytab)
+        ;; First JAAS file should have been cleaned up
+        (is (not (.exists (java.io.File. first-jaas-path))))
+        ;; New config should be active
+        (let [jaas-content (slurp (System/getProperty "java.security.auth.login.config"))]
+          (is (.contains jaas-content "user@REALM2"))))
+      (finally
+        (clear-kerberos-credentials)))))
