@@ -1,7 +1,8 @@
 (ns clojure-solr.security
   (:use [clojure-solr :only [*connection*]])
   (:require [clojure-solr.admin :as solradmin])
-  (:require [clojure.pprint :as pprint])
+  (:require [clojure.pprint :as pprint]
+            [clojure.string :as str])
   (:import [java.nio.charset StandardCharsets]
            [java.security MessageDigest NoSuchAlgorithmException SecureRandom]
            [java.util Random]
@@ -95,6 +96,9 @@
        (:salt m)))
 
 (def no-generate-password "CLOJURE_SOLR_NO_GENERATE_PASSWORD")
+(def allow-password-generation (atom (if (System/getenv no-generate-password)
+                                       (#{"true" "1"} (str/lower-case (System/getenv no-generate-password)))
+                                       true)))
 
 (defn make-security-data
   "In the monadic form, security-json-plus is the conventional Clojure
@@ -157,7 +161,7 @@
      (let [solr-credentials (for [[user password-spec] credentials
                                   :let [password-data (cond (is-password-map? password-spec)
                                                             password-spec
-                                                            (System/getenv no-generate-password)
+                                                            (not @allow-password-generation)
                                                             (throw (Exception. "clojure-solr password generation is disabled"))
                                                             :else (hash-password password-spec))]]
                               [user (assoc password-data
@@ -173,7 +177,8 @@
                                                 [user (str (:hashed-password creds) " " (:salt creds))]))}
                           (:authentication security-json-plus)) 
         :credentials solr-credentials})))
-  ([users-passwords-and-roles roles-and-permissions]
+  ([users-passwords-and-roles roles-and-permissions & {:keys [allow-password-generation]
+                                                       :or {allow-password-generation @allow-password-generation}}]
    (let [credentials (into {}
                            (for [{:keys [user password]} users-passwords-and-roles
                                  :let [password-data (cond (and (map? password)
@@ -181,7 +186,7 @@
                                                                 (not-empty (:hashed-password password))
                                                                 (not-empty (:salt password)))
                                                            password
-                                                           (System/getenv no-generate-password)
+                                                           (not allow-password-generation)
                                                            (throw (Exception. "clojure-solr password generation is disabled"))
                                                            :else (hash-password password))]]
                              [user (assoc password-data
