@@ -22,9 +22,12 @@
            (javax.net.ssl SSLContext)
            (org.apache.http.conn.ssl SSLConnectionSocketFactory NoopHostnameVerifier TrustSelfSignedStrategy)
            (org.apache.solr.client.solrj SolrQuery SolrRequest$METHOD SolrClient)
+           ;; NOTE: Krb5HttpClientBuilder is deliberately NOT imported.  In SolrJ 9.x it
+           ;; links against org.eclipse.jetty.client.api.Authentication, so importing it
+           ;; here would force Solr's Jetty onto the classpath of every user of this
+           ;; library.  It is loaded reflectively in set-kerberos-credentials instead.
            (org.apache.solr.client.solrj.impl HttpSolrClient HttpSolrClient$Builder HttpClientUtil
-                                              ConcurrentUpdateSolrClient ConcurrentUpdateSolrClient$Builder
-                                              Krb5HttpClientBuilder)
+                                              ConcurrentUpdateSolrClient ConcurrentUpdateSolrClient$Builder)
            (java.util.jar Manifest)
            (java.time.temporal ChronoUnit)
            (org.apache.solr.client.solrj.response QueryResponse
@@ -341,6 +344,38 @@
     (System/clearProperty "java.security.auth.login.config")
     (reset! kerberos-config nil)))
 
+(defn- krb5-classpath-error
+  "Turn a class-resolution failure from make-krb5-http-client-builder into an
+   actionable message.  SolrJ's Krb5HttpClientBuilder implements a Jetty-based
+   interface, so it needs Solr's Jetty client jars even though clojure-solr
+   otherwise does not."
+  [cause]
+  (ex-info (str "Kerberos support requires SolrJ's Krb5HttpClientBuilder and the Jetty "
+                "client jars it references (org.eclipse.jetty/jetty-client, "
+                "org.eclipse.jetty.http2/http2-client and their dependencies). "
+                "Missing class: " (.getMessage cause) ". "
+                "Remove those artifacts from your Solr dependency exclusions to use "
+                "set-kerberos-credentials.")
+           {:missing-class (.getMessage cause)}
+           cause))
+
+(defn- make-krb5-http-client-builder
+  "Reflectively construct SolrJ's Krb5HttpClientBuilder and return its
+   SolrHttpClientBuilder.  Loaded reflectively so that the Jetty classes
+   Krb5HttpClientBuilder references are only required by callers that actually
+   use Kerberos.  See the note on the :import form at the top of this file."
+  []
+  (try
+    (let [klass (Class/forName "org.apache.solr.client.solrj.impl.Krb5HttpClientBuilder")]
+      (-> (.getMethod klass "getBuilder" (make-array Class 0))
+          (.invoke (.newInstance (.getDeclaredConstructor klass (make-array Class 0))
+                                 (make-array Object 0))
+                   (make-array Object 0))))
+    (catch ClassNotFoundException e
+      (throw (krb5-classpath-error e)))
+    (catch NoClassDefFoundError e
+      (throw (krb5-classpath-error e)))))
+
 (defn set-kerberos-credentials
   "Configure JVM-wide Kerberos (SPNEGO) authentication for Solr connections.
    Sets system properties and configures JAAS for SolrJ's Krb5HttpClientBuilder.
@@ -393,7 +428,7 @@
     (System/setProperty "java.security.krb5.conf" (.getAbsolutePath krb5-conf-file))
     (System/setProperty "java.security.auth.login.config" (.getAbsolutePath jaas-conf-file))
     ;; Configure SolrJ to use Kerberos-aware HTTP client builder
-    (HttpClientUtil/setHttpClientBuilder (.getBuilder (Krb5HttpClientBuilder.)))
+    (HttpClientUtil/setHttpClientBuilder (make-krb5-http-client-builder))
     ;; Store configuration in atom (track temp files for cleanup)
     (reset! kerberos-config
             {:principal principal

@@ -1,5 +1,25 @@
 (def jackson-version "2.18.0")
 
+(def solr9-version "9.7.0")
+
+;; Jetty artifacts that solr-solrj pulls in for the Http2SolrClient family.
+;; clojure-solr builds only the Apache HttpClient-based clients (HttpSolrClient,
+;; ConcurrentUpdateSolrClient), so none of these are needed at runtime.  Excluding
+;; them keeps Solr's Jetty off the classpath of applications that embed a
+;; different Jetty version.
+(def jetty-exclusions
+  '[org.eclipse.jetty/jetty-client
+    org.eclipse.jetty/jetty-http
+    org.eclipse.jetty/jetty-io
+    org.eclipse.jetty/jetty-util
+    org.eclipse.jetty/jetty-alpn-client
+    org.eclipse.jetty/jetty-alpn-java-client
+    org.eclipse.jetty.http2/http2-client
+    org.eclipse.jetty.http2/http2-common
+    org.eclipse.jetty.http2/http2-hpack
+    org.eclipse.jetty.http2/http2-http-client-transport
+    org.eclipse.jetty.toolchain/jetty-servlet-api])
+
 (defproject cc.artifice/clojure-solr "5.0.0-SNAPSHOT"
   :dependencies [[commons-io "2.6"]
                  [commons-fileupload "1.4" :exclusions [commons-io]]
@@ -48,11 +68,27 @@
              :1.9 {:dependencies [[org.clojure/clojure "1.9.0"]]}
              :1.10 {:dependencies [[org.clojure/clojure "1.10.1"]]}
              :1.11 {:dependencies [[org.clojure/clojure "1.11.2"]]}
+             ;; Everything clojure-solr itself needs at runtime, and nothing more.
+             ;; solr-core is NOT required: nothing under src/ references a solr-core
+             ;; class.  Neither is Jetty.  Use this profile as the model for the Solr
+             ;; dependencies of an application that embeds a different Jetty version:
+             ;;   lein with-profile +1.11,+solr9-client classpath | tr : '\\n' | grep jetty
+             ;; should come back empty.
+             :solr9-client {:pom-addition [:properties ["solrj.major.version" "9"]]
+                            :dependencies [[org.apache.solr/solr-solrj ~solr9-version
+                                            :exclusions ~jetty-exclusions]
+                                           ;; SolrZkClient/ZkStateReader, used by clojure-solr.admin
+                                           [org.apache.solr/solr-solrj-zookeeper ~solr9-version
+                                            :exclusions ~jetty-exclusions]]}
+             ;; Build/test profile.  solr-core is here only for the EmbeddedSolrServer
+             ;; the test suite runs against; CoreContainer.load builds an Http2SolrClient,
+             ;; so Jetty must stay on this classpath.
              :solr9 {:pom-addition [:properties ["solrj.major.version" "9"]]
-                     :dependencies [[org.apache.solr/solr-core "9.7.0" :exclusions [commons-fileupload 
-                                                                                    joda-time
-                                                                                    org.apache.logging.log4j/log4j-slf4j2-impl]]
-                                    [org.apache.solr/solr-solrj "9.7.0"]]}
+                     :dependencies [[org.apache.solr/solr-core ~solr9-version
+                                     :exclusions [commons-fileupload
+                                                  joda-time
+                                                  org.apache.logging.log4j/log4j-slf4j2-impl]]
+                                    [org.apache.solr/solr-solrj ~solr9-version]]}
              :solr8 {:pom-addition [:properties ["solrj.major.version" "8"]]
                      :dependencies [[org.apache.solr/solr-core "8.11.4" :exclusions [commons-fileupload joda-time]]
                                     [org.apache.solr/solr-solrj "8.11.4"]]}

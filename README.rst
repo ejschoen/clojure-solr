@@ -20,6 +20,51 @@ Use lein with-profile +1.8,+solr7 repl (or test) for example to include Clojure 
 Use :classifier option solr6, solr7, or solr8 in other Leiningen projects to get the appropriate builds,
 and provide Clojure and Solr (solr-core, solr-solrj) dependencies in the project that uses clojure-solr.
 
+Solr dependencies and Jetty
+---------------------------
+
+clojure-solr needs only SolrJ.  Nothing under ``src/`` references a solr-core class,
+and nothing uses Solr's Jetty-based clients (Http2SolrClient and friends), so Solr's
+Jetty can be excluded entirely.  For an application on Solr 9::
+
+    [org.apache.solr/solr-solrj "9.7.0"
+     :exclusions [org.eclipse.jetty/jetty-client
+                  org.eclipse.jetty/jetty-http
+                  org.eclipse.jetty/jetty-io
+                  org.eclipse.jetty/jetty-util
+                  org.eclipse.jetty/jetty-alpn-client
+                  org.eclipse.jetty/jetty-alpn-java-client
+                  org.eclipse.jetty.http2/http2-client
+                  org.eclipse.jetty.http2/http2-common
+                  org.eclipse.jetty.http2/http2-hpack
+                  org.eclipse.jetty.http2/http2-http-client-transport
+                  org.eclipse.jetty.toolchain/jetty-servlet-api]]
+
+    ;; only if you call the ZooKeeper functions in clojure-solr.admin
+    ;; (SolrZkClient, ZkStateReader); same :exclusions
+    [org.apache.solr/solr-solrj-zookeeper "9.7.0" :exclusions [...]]
+
+The ``solr9-client`` profile in this project's project.clj is exactly that
+dependency set, and is verified to carry no Jetty::
+
+    lein with-profile +1.11,+solr9-client classpath | tr : '\n' | grep -i jetty
+
+Two things still require Solr's Jetty:
+
+- ``set-kerberos-credentials``.  SolrJ's Krb5HttpClientBuilder implements a
+  Jetty-based interface, so it needs jetty-client and http2-client back on the
+  classpath.  clojure-solr loads that class reflectively, so excluding Jetty is
+  harmless unless you actually call the function, which then throws an ex-info
+  naming the missing jars.
+
+- ``EmbeddedSolrServer``.  CoreContainer.load builds an Http2SolrClient, so
+  embedded Solr pulls in solr-core and Solr's Jetty.  Solr 9.7's Http2SolrClient
+  does **not** run on Jetty 12 -- Jetty 12 flattened ``org.eclipse.jetty.client.api.*``
+  into ``org.eclipse.jetty.client.*``, so it fails with NoClassDefFoundError on
+  ``org/eclipse/jetty/client/api/Response$CompleteListener``.  An application that
+  runs on Jetty 12 therefore cannot host embedded Solr in the same JVM; run Solr
+  out of process for those tests instead.
+
 To build from source, run:
 
 ::
