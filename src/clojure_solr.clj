@@ -408,32 +408,42 @@
   impl/mark-shared!)
 
 ;;; The SolrConnection protocol, re-exported so that callers replacing a type
-;;; test do not have to require clojure-solr.impl as well.  These are the same
-;;; vars; :refer alone would not have been enough, since a referred var is not
-;;; reachable as clojure-solr/drain from another namespace.
+;;; test do not have to require clojure-solr.impl as well.  :refer alone would
+;;; not have been enough -- a referred var is not reachable as
+;;; clojure-solr/drain from another namespace.
+;;;
+;;; These must delegate rather than alias.  extend rebinds a protocol method's
+;;; var root to a fn closing over a fresh MethodImplCache, so (def drain
+;;; impl/drain) would capture the dispatch table as it stood when this namespace
+;;; loaded -- before the implementation namespace extended it -- and every
+;;; connection would silently get the SolrClient default.
 
-(def drain
-  "Block until buffered updates have been flushed; see
-   clojure-solr.impl/drain.  Replaces testing a connection's class to decide
-   whether to call .blockUntilFinished."
-  impl/drain)
+(defn drain
+  "Block until buffered updates have been flushed; see clojure-solr.impl/drain.
+   Replaces testing a connection's class to decide whether to call
+   .blockUntilFinished."
+  [conn]
+  (impl/drain conn))
 
-(def shared?
+(defn shared?
   "True if this connection is a process-lifetime resource; see
    clojure-solr.impl/shared?.  Replaces testing a connection's class to decide
    whether it is safe to close."
-  impl/shared?)
+  [conn]
+  (impl/shared? conn))
 
-(def base-url
+(defn base-url
   "The collection URL this connection talks to; see clojure-solr.impl/base-url.
    Replaces interop on .getBaseURL, which names a class that differs between
    SolrJ versions and is not exposed by the Solr 10 authenticating wrapper."
-  impl/base-url)
+  [conn]
+  (impl/base-url conn))
 
-(def unwrap
+(defn unwrap
   "The underlying SolrClient, with any clojure-solr decoration removed; see
    clojure-solr.impl/unwrap."
-  impl/unwrap)
+  [conn]
+  (impl/unwrap conn))
 
 (defmulti make-solr-client
   "Extension point for building a SolrClient.  Dispatches on (:type opts).

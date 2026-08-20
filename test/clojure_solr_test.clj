@@ -788,3 +788,24 @@
           (is (.contains jaas-content "user@REALM2"))))
       (finally
         (clear-kerberos-credentials)))))
+
+(deftest test-connection-protocol-reexports-dispatch
+  ;; clojure-solr re-exports the SolrConnection protocol.  Aliasing the protocol
+  ;; method vars (def base-url impl/base-url) would freeze the dispatch cache as
+  ;; it stood before the implementation namespace extended the protocol, so a
+  ;; real client would silently fall through to the SolrClient default and
+  ;; base-url would answer nil.  No server is contacted here: building a client
+  ;; does not open a connection.
+  (let [url "http://localhost:18983/solr/nosuch"
+        client (connect url)]
+    (try
+      (is (= url (base-url client))
+          "base-url must reach the implementation's extension, not the default")
+      (is (= (base-url client) (clojure-solr.impl/base-url client)))
+      (is (false? (shared? client)))
+      (is (identical? client (unwrap client)))
+      (is (nil? (drain client)))
+      ;; The embedded server is registered as shared, and reports no base URL.
+      (is (true? (shared? *connection*)))
+      (is (nil? (base-url *connection*)))
+      (finally (.close ^SolrClient client)))))
