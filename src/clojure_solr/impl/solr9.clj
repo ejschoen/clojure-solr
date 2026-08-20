@@ -13,6 +13,10 @@
            (org.apache.http.protocol HttpContext HttpCoreContext)
            (org.apache.http.ssl SSLContexts SSLContextBuilder)
            (org.apache.http.conn.ssl SSLConnectionSocketFactory NoopHostnameVerifier TrustSelfSignedStrategy)
+           (org.apache.http.config RegistryBuilder)
+           (org.apache.http.conn.socket PlainConnectionSocketFactory)
+           (org.apache.http.impl.conn PoolingHttpClientConnectionManager)
+           (java.util.concurrent TimeUnit)
            (javax.net.ssl SSLContext)
            (org.apache.solr.client.solrj SolrQuery)
            (org.apache.solr.client.solrj.impl HttpSolrClient HttpSolrClient$Builder HttpClientUtil
@@ -105,6 +109,26 @@
 ;;; Client construction
 ;;; ---------------------------------------------------------------------------
 
+(defn build-pool-manager
+  "An Apache pooling connection manager from clojure-solr's version-neutral pool
+   options.  Callers used to construct this themselves, along with the socket
+   factory registry needed to carry TLS settings through it."
+  [{:keys [max-connections-per-host max-connections-total time-to-live-seconds
+           ssl-trust-store] :as opts}]
+  (let [registry (-> (RegistryBuilder/create)
+                     (.register "http" (PlainConnectionSocketFactory/getSocketFactory))
+                     (.register "https" (or (when ssl-trust-store
+                                              (build-connection-socket-factory opts))
+                                            (SSLConnectionSocketFactory/getSocketFactory)))
+                     (.build))
+        mgr (if time-to-live-seconds
+              (PoolingHttpClientConnectionManager. registry nil nil nil
+                                                  (long time-to-live-seconds) TimeUnit/SECONDS)
+              (PoolingHttpClientConnectionManager. registry))]
+    (when max-connections-per-host (.setDefaultMaxPerRoute mgr (int max-connections-per-host)))
+    (when max-connections-total (.setMaxTotal mgr (int max-connections-total)))
+    mgr))
+
 (def ^:private default-connection-manager (atom nil))
 
 (defn set-default-connection-manager! [m] (reset! default-connection-manager m))
@@ -114,7 +138,9 @@
   ^CloseableHttpClient
   [{:keys [conn-manager credential socket-timeout ssl-trust-store] :as opts} major-version]
   (let [^HttpClientBuilder builder (HttpClientBuilder/create)
-        mgr (or conn-manager @default-connection-manager)
+        mgr (or (when (map? conn-manager) (build-pool-manager (merge opts conn-manager)))
+                (when-not (map? conn-manager) conn-manager)
+                @default-connection-manager)
         interceptor-fn (credential->interceptor-fn credential)]
     (.setDefaultCredentialsProvider builder (BasicCredentialsProvider.))
     (when mgr (.setConnectionManager builder mgr))

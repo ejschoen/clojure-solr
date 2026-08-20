@@ -445,8 +445,15 @@
    applied per host.  Returns a SolrClient, which callers should treat as opaque
    and use through with-connection.
 
-   Optional second argument is a connection manager, honoured on Solr 9 and
-   ignored on Solr 10.  Optional third argument is a map of client options:
+   Optional second argument is either a map of pooling options or, on Solr 9, a
+   pre-built Apache connection manager.  Prefer the map, which works on both:
+
+     :max-connections-per-host  int
+     :max-connections-total     int, Solr 9 only
+     :time-to-live-seconds      int, Solr 9 only
+
+   On Solr 10 the JDK client pools and reclaims idle connections by itself, so
+   the last two have no equivalent and are reported once and ignored.  Optional third argument is a map of client options:
 
      :type                      :http (default), :concurrent-update, or any type
                                 registered with make-solr-client

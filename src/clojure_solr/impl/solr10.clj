@@ -86,6 +86,21 @@
 ;;; Client construction
 ;;; ---------------------------------------------------------------------------
 
+(defonce ^:private pool-warning-shown (atom false))
+
+(defn- pool-options
+  "Translate clojure-solr's pool options onto the JDK client, which pools and
+   reclaims idle connections internally.  Only a per-host cap has an equivalent;
+   the rest are reported once and dropped."
+  [conn-manager]
+  (when (map? conn-manager)
+    (let [dropped (select-keys conn-manager [:max-connections-total :time-to-live-seconds])]
+      (when (and (seq dropped) (compare-and-set! pool-warning-shown false true))
+        (println "WARNING: clojure-solr:" (pr-str (keys dropped))
+                 "have no equivalent on SolrJ 10 and are ignored."
+                 "The JDK client pools connections and reclaims idle ones on its own."))
+      (select-keys conn-manager [:max-connections-per-host]))))
+
 (defn- jdk-client
   [url {:keys [ssl-trust-store socket-timeout connection-timeout
                max-connections-per-host default-collection] :as opts}]
@@ -104,7 +119,7 @@
   impl/SolrImpl
   (make-client [_ url opts]
     (case (:type opts :http)
-      :http (jdk-client url opts)
+      :http (jdk-client url (merge opts (pool-options (:conn-manager opts))))
       :concurrent-update
       (impl/unsupported! :concurrent-update
                          (str "SolrJ 10's batching client is ConcurrentUpdateJettySolrClient, "
