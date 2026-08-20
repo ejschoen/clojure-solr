@@ -4,30 +4,19 @@
   (:require [clj-time.core :as t])
   (:require [clj-time.format :as tformat])
   (:require [clj-time.coerce :as tcoerce])
+  (:require [clojure-solr.impl :as impl
+             :refer [drain shared? base-url unwrap]])
   (:import (java.io File FileOutputStream)
            (java.net URI)
            (java.util Base64 HashMap List ArrayList Map)
            (java.nio.charset Charset)
            (java.nio.file Files)
            (java.nio.file.attribute PosixFilePermissions FileAttribute)
-           (org.apache.http HttpRequest HttpRequestInterceptor HttpHeaders)
-           (org.apache.http.auth AuthState AuthScope UsernamePasswordCredentials)
-           (org.apache.http.client.protocol HttpClientContext)
-           (org.apache.http.config SocketConfig SocketConfig$Builder)
-           (org.apache.http.impl.auth BasicScheme)
-           (org.apache.http.impl.client BasicCredentialsProvider HttpClientBuilder CloseableHttpClient)
-           (org.apache.http.protocol HttpContext HttpCoreContext)
-           (org.apache.http.ssl SSLContexts SSLContextBuilder)
-           (org.apache.http.conn HttpClientConnectionManager)
-           (javax.net.ssl SSLContext)
-           (org.apache.http.conn.ssl SSLConnectionSocketFactory NoopHostnameVerifier TrustSelfSignedStrategy)
-           (org.apache.solr.client.solrj SolrQuery SolrRequest$METHOD SolrClient)
-           ;; NOTE: Krb5HttpClientBuilder is deliberately NOT imported.  In SolrJ 9.x it
-           ;; links against org.eclipse.jetty.client.api.Authentication, so importing it
-           ;; here would force Solr's Jetty onto the classpath of every user of this
-           ;; library.  It is loaded reflectively in set-kerberos-credentials instead.
-           (org.apache.solr.client.solrj.impl HttpSolrClient HttpSolrClient$Builder HttpClientUtil
-                                              ConcurrentUpdateSolrClient ConcurrentUpdateSolrClient$Builder)
+           ;; No Apache HttpClient and no SolrJ class that moved or disappeared in
+           ;; Solr 10 is named here.  Client construction, credentials, TLS and
+           ;; SolrQuery all live behind clojure-solr.impl, which is what lets this
+           ;; namespace compile and run against either SolrJ 9 or SolrJ 10.
+           (org.apache.solr.client.solrj SolrRequest$METHOD SolrClient)
            (java.util.jar Manifest)
            (java.time.temporal ChronoUnit)
            (org.apache.solr.client.solrj.response QueryResponse
@@ -41,7 +30,6 @@
            #_(org.apache.solr.util DateMathParser)))
 
 (defonce ^:private url-details (atom {}))
-(defonce ^{:private true :tag BasicCredentialsProvider}  basic-credentials-provider (BasicCredentialsProvider.))
 (defonce ^:private default-connection-manager (atom nil))
 
 (declare ^{:dynamic true :tag SolrClient} *connection*)
@@ -50,7 +38,16 @@
 
 (declare make-param)
 
-(defn set-default-connection-manager [^HttpClientConnectionManager conn-mgr]
+(defn set-default-connection-manager
+  "Set a default Apache connection manager for new connections.
+
+   DEPRECATED.  Solr 10 has no Apache connection manager: the JDK client pools
+   internally and reclaims idle connections without configuration.  Accepted and
+   honoured on Solr 9; ignored, with a warning, on Solr 10."
+  [conn-mgr]
+  (when-not (impl/supports? :connection-manager)
+    (println "WARNING: set-default-connection-manager is ignored on this SolrJ;"
+             "the JDK client pools connections internally."))
   (reset! default-connection-manager conn-mgr))
 
 (defn get-default-connection-manager []
@@ -130,8 +127,8 @@
 
 (defn get-solr-version
   []
-  (let [name (format "%s.class" (.getSimpleName SolrQuery))
-        resource (str (.getResource SolrQuery name))]
+  (let [name (format "%s.class" (.getSimpleName SolrClient))
+        resource (str (.getResource SolrClient name))]
     (if (re-matches #"jar:.+" resource)
       (let [manifest-name (str (subs resource 0 (inc (.lastIndexOf resource "!"))) "/META-INF/MANIFEST.MF")]
         (with-open [s (.openStream (java.net.URL. manifest-name))]
@@ -180,14 +177,12 @@
 ;; These next credential functions are for setting basic auth
 ;; when needing to access Solr behind a proxy such as
 ;; apache2 or nginx.
-;; However, these are also compatible with the BasicAuthenticationPlugin.
-(defn make-basic-credentials
-  [name password]
-  (UsernamePasswordCredentials. name password))
-
-(defn make-auth-scope
-  [host port]
-  (AuthScope. host port))
+;; Credentials are held as data rather than as Apache objects, so that the
+;; implementation can decide how to apply them: a request interceptor on Solr 9,
+;; per-request decoration on Solr 10.  See clojure-solr.impl.
+;;
+;;   {:type :basic :host h :port p :name n :password p}
+;;   {:type :token :host h :port p :token-fn (fn [] "...")}
 
 (defn get-url-details
   [url]
@@ -217,16 +212,16 @@
 (defprotocol SolrAuthentication
   (add-authentication [this request context]))
 
-(deftype SolrBasicAuthentication [^BasicCredentialsProvider basic-credentials-provider]
-    SolrAuthentication
-    (add-authentication [this request  context]
-      (let [^AuthState auth-state (.getAttribute ^HttpContext context HttpClientContext/TARGET_AUTH_STATE)]
-        (when (nil? (.getAuthScheme auth-state))
-          (let [target-host (.getAttribute context HttpCoreContext/HTTP_TARGET_HOST)
-                auth-scope (make-auth-scope (.getHostName target-host) (.getPort target-host))
-                creds (.getCredentials basic-credentials-provider auth-scope)]
-            (when creds
-              (.update auth-state (BasicScheme.) creds)))))))
+(defn basic-credentials
+  "A basic-auth credential for host/port."
+  [host port name password]
+  {:type :basic :host host :port port :name name :password password})
+
+(defn token-credentials
+  "A bearer-token credential for host/port.  token-fn is called on each request,
+   so a token that rotates or expires stays current."
+  [host port token-fn]
+  {:type :token :host host :port port :token-fn token-fn})
 
 #_(deftype SolrJWTAuthentication []
   SolrAuthentication
@@ -304,12 +299,8 @@
           userinfo (.getUserInfo this)]
       (cond (and authenticator (not userinfo))
             authenticator
-            userinfo (let [provider (BasicCredentialsProvider.)
-                           [name password] (str/split userinfo #":")]
-                         (.setCredentials provider 
-                                          ^AuthScope (make-auth-scope host port) 
-                                          ^UsernamePasswordCredentials (make-basic-credentials name password))
-                         (SolrBasicAuthentication. provider))
+            userinfo (let [[name password] (str/split userinfo #":")]
+                       (basic-credentials host port name password))
             :else
             nil)))
   java.net.URL
@@ -318,15 +309,16 @@
 
 
 (defn set-credentials
-  "Set basic authentication credentials for a given Solr URI."
-  ([uri authenticator]
-   (swap! authenticators assoc-in [(.getHost uri) (.getPort uri)] authenticator))
+  "Set authentication credentials for a Solr URI.
+
+   The two-argument form takes either a credential map (see basic-credentials
+   and token-credentials) or a legacy object satisfying SolrAuthentication.
+   Legacy objects are honoured on Solr 9 only: they are handed an Apache request
+   and context, which Solr 10 does not have."
+  ([uri credential]
+   (swap! authenticators assoc-in [(.getHost uri) (.getPort uri)] credential))
   ([^java.net.URI uri name password]
-   (let [provider (BasicCredentialsProvider.)]
-     (.setCredentials provider 
-                      ^AuthScope (make-auth-scope (.getHost uri) (.getPort uri)) 
-                      ^UsernamePasswordCredentials (make-basic-credentials name password))
-     (set-credentials uri (SolrBasicAuthentication. provider) ) )))
+   (set-credentials uri (basic-credentials (.getHost uri) (.getPort uri) name password))))
 
 (defn kerberos-configured?
   "Returns true if Kerberos authentication has been configured via set-kerberos-credentials."
@@ -335,7 +327,7 @@
 
 (defn clear-kerberos-credentials
   "Remove Kerberos authentication configuration, clean up temp files,
-   and restore default HttpClientUtil builder."
+   and restore the default SolrJ HTTP client builder."
   []
   (when-let [config @kerberos-config]
     (doseq [f (:temp-files config)]
@@ -343,38 +335,6 @@
     (System/clearProperty "java.security.krb5.conf")
     (System/clearProperty "java.security.auth.login.config")
     (reset! kerberos-config nil)))
-
-(defn- krb5-classpath-error
-  "Turn a class-resolution failure from make-krb5-http-client-builder into an
-   actionable message.  SolrJ's Krb5HttpClientBuilder implements a Jetty-based
-   interface, so it needs Solr's Jetty client jars even though clojure-solr
-   otherwise does not."
-  [cause]
-  (ex-info (str "Kerberos support requires SolrJ's Krb5HttpClientBuilder and the Jetty "
-                "client jars it references (org.eclipse.jetty/jetty-client, "
-                "org.eclipse.jetty.http2/http2-client and their dependencies). "
-                "Missing class: " (.getMessage cause) ". "
-                "Remove those artifacts from your Solr dependency exclusions to use "
-                "set-kerberos-credentials.")
-           {:missing-class (.getMessage cause)}
-           cause))
-
-(defn- make-krb5-http-client-builder
-  "Reflectively construct SolrJ's Krb5HttpClientBuilder and return its
-   SolrHttpClientBuilder.  Loaded reflectively so that the Jetty classes
-   Krb5HttpClientBuilder references are only required by callers that actually
-   use Kerberos.  See the note on the :import form at the top of this file."
-  []
-  (try
-    (let [klass (Class/forName "org.apache.solr.client.solrj.impl.Krb5HttpClientBuilder")]
-      (-> (.getMethod klass "getBuilder" (make-array Class 0))
-          (.invoke (.newInstance (.getDeclaredConstructor klass (make-array Class 0))
-                                 (make-array Object 0))
-                   (make-array Object 0))))
-    (catch ClassNotFoundException e
-      (throw (krb5-classpath-error e)))
-    (catch NoClassDefFoundError e
-      (throw (krb5-classpath-error e)))))
 
 (defn set-kerberos-credentials
   "Configure JVM-wide Kerberos (SPNEGO) authentication for Solr connections.
@@ -428,7 +388,7 @@
     (System/setProperty "java.security.krb5.conf" (.getAbsolutePath krb5-conf-file))
     (System/setProperty "java.security.auth.login.config" (.getAbsolutePath jaas-conf-file))
     ;; Configure SolrJ to use Kerberos-aware HTTP client builder
-    (HttpClientUtil/setHttpClientBuilder (make-krb5-http-client-builder))
+    (impl/kerberos-install!)
     ;; Store configuration in atom (track temp files for cleanup)
     (reset! kerberos-config
             {:principal principal
@@ -440,110 +400,85 @@
                            (bytes? keytab) (conj keytab-file))})))
 
 
-(defmulti make-solr-client (fn [url http-client solr-major-version solr-client-options] (:type solr-client-options)))
+(def mark-shared!
+  "Declare a client class to be a process-lifetime resource; see
+   clojure-solr.impl/mark-shared!.  Embedded-Solr builds call this so that a
+   nested with-connection reuses the bound server instead of rebuilding it."
+  impl/mark-shared!)
 
-(defmethod make-solr-client :default [url http-client solr-major-version solr-client-options]
-  (.build
-   (doto (HttpSolrClient$Builder. url)
-     (cond-> http-client (.withHttpClient http-client))
-     (cond-> (#{true false} (:allow-compression solr-client-options))
-       (.allowCompression (:allow-compression solr-client-options)))
-     (cond-> (not-empty (:kerberos-delegation-token solr-client-options))
-       (.withKerberosDelegationToken (:kerberos-delegation-token solr-client-options)))
-     (cond-> (and (:socket-timeout solr-client-options)
-                  (>= solr-major-version 7))
-       (.withSocketTimeout (:socket-timeout solr-client-options)))
-     (cond-> (and (:connection-timeout solr-client-options)
-                  (>= solr-major-version 7))
-       (.withConnectionTimeout (:connection-timeout solr-client-options))))))
+(defmulti make-solr-client
+  "Extension point for building a SolrClient.  Dispatches on (:type opts).
 
-(defmethod  make-solr-client ConcurrentUpdateSolrClient [url http-client solr-major-version solr-client-options]
-  (.build
-   (doto (ConcurrentUpdateSolrClient$Builder. url)
-     (cond-> http-client (.withHttpClient http-client))
-     (cond-> (and (:queue-size solr-client-options)
-                  (>= solr-major-version 7))
-       (.withQueueSize (:queue-size solr-client-options)))
-     (cond-> (and (:thread-count solr-client-options)
-                  (>= solr-major-version 7))
-       (.withThreadCount (:thread-count solr-client-options)))
-     (cond-> (and (:socket-timeout solr-client-options)
-                  (>= solr-major-version 7))
-       (.withSocketTimeout (:socket-timeout solr-client-options)))
-     (cond-> (and (:connection-timeout solr-client-options)
-                  (>= solr-major-version 7))
-       (.withConnectionTimeout (:connection-timeout solr-client-options))))))
+   Built-in values are :http (the default) and :concurrent-update, handled by
+   the implementation for the SolrJ on the classpath.  Additional types may be
+   registered with defmethod -- the embedded-Solr builds do exactly that.
 
-(defn ^SSLConnectionSocketFactory build-connection-socket-factory
-  [{:keys [ssl-trust-store ssl-trust-password]}]
-  ;;(println "******** build-connection-socket-factory: trust store:" (pr-str ssl-trust-store))
-  (when ssl-trust-store
-    (let [^SSLContextBuilder sslbuilder (SSLContexts/custom)]
-      (cond (= :self-signed ssl-trust-store)
-            (.loadTrustMaterial sslbuilder nil (TrustSelfSignedStrategy.))
-            ssl-trust-password
-            (.loadTrustMaterial sslbuilder ssl-trust-store (.toCharArray ssl-trust-password))
-            :else (.loadTrustMaterial sslbuilder ssl-trust-store))
-      (let [^SSLContext ssl-context (.build sslbuilder)]
-        (SSLConnectionSocketFactory. ssl-context NoopHostnameVerifier/INSTANCE)))))
+   Dispatch is on a keyword rather than a class object so that a caller never has
+   to name a class that a given SolrJ may not have."
+  (fn [url http-client solr-major-version solr-client-options]
+    (:type solr-client-options :http)))
 
-(defn ^HttpSolrClient connect [url & [conn-manager solr-client-options]]
-  "Create an HttpSolrClient connection to a Solr URI. Optionally use
-   a provided connection-manager, such as PoolingHttpClientConnectionManager,
-   for situations where Solr's default connection manager cannot keep up
-   with demand.
-   When Kerberos authentication has been configured via set-kerberos-credentials,
-   connections will automatically use SPNEGO negotiation. The Kerberos-aware HTTP
-   client is created by SolrJ's HttpClientUtil using the Krb5HttpClientBuilder.
-   Per-host basic authentication (set-credentials) takes precedence over Kerberos
-   for specific hosts where both are configured.
-   solr-client-options is a map with:
-     :type                      type of Solr client to create: HttpSolrClient (default),
-                                ConcurrentUpdateSolrClient, EmbeddedSolrServer (ie, for testing)
-   for HttpSolrClient:
-     :ssl-trust-store           File object pointing trust store .p12 file, or :self-signed
-     :ssl-trust-password        Optional password for trust store
-     :allow-compression         true/false
-     :kerberos-delegation-token string
-     :socket-timeout            int in milliseconds
-     :connection-timeout        int in milliseconds
-   for ConcurrentUpdateSolrClient:
+(defmethod make-solr-client :default
+  [url http-client solr-major-version solr-client-options]
+  (impl/make-client (impl/impl) url solr-client-options))
+
+(defn build-connection-socket-factory
+  "Apache SSLConnectionSocketFactory for the given ssl options.
+
+   DEPRECATED and Solr 9 only.  It exists because callers used it to build a
+   socket-factory registry for a pooling connection manager; Solr 10 has neither.
+   Pass :ssl-trust-store to connect instead and let the implementation configure
+   TLS."
+  [ssl-opts]
+  (if (impl/supports? :connection-manager)
+    (let [f (ns-resolve 'clojure-solr.impl.solr9 'build-connection-socket-factory)]
+      (f ssl-opts))
+    (impl/unsupported! :connection-manager
+                       (str "build-connection-socket-factory builds an Apache "
+                            "SSLConnectionSocketFactory, which SolrJ 10 does not use. "
+                            "Pass :ssl-trust-store to connect instead."))))
+
+(defn connect
+  "Create a connection to a Solr URI.
+
+   url may embed credentials as user:password@host; they are extracted and
+   applied per host.  Returns a SolrClient, which callers should treat as opaque
+   and use through with-connection.
+
+   Optional second argument is a connection manager, honoured on Solr 9 and
+   ignored on Solr 10.  Optional third argument is a map of client options:
+
+     :type                      :http (default), :concurrent-update, or any type
+                                registered with make-solr-client
+   for :http
+     :ssl-trust-store           File pointing at a trust store, or :self-signed
+     :ssl-trust-password        Optional password for the trust store
+     :allow-compression         true/false                     (Solr 9)
+     :kerberos-delegation-token string                         (Solr 9)
+     :socket-timeout            int, milliseconds
+     :connection-timeout        int, milliseconds
+   for :concurrent-update
      :queue-size                integer buffer capacity
-     :thread-count              integer background processing thread count
-     :socket-timeout            int in milliseconds
-     :connection-timeout        int in milliseconds
-   for EmbeddedSolrServer:
-     :home-dir                  path to directory containing core files
-     :core                      name of core to create"
+     :thread-count              integer background thread count
+     :socket-timeout            int, milliseconds
+     :connection-timeout        int, milliseconds
+
+   When Kerberos has been configured with set-kerberos-credentials, connections
+   negotiate with SPNEGO.  Per-host credentials set with set-credentials take
+   precedence over Kerberos for those hosts."
+  [url & [conn-manager solr-client-options]]
   (let [solr-major-version (get-solr-major-version)
-        authenticator (when url (get-authenticator url))
-        use-kerberos (and (kerberos-configured?) (nil? authenticator))
-        ^CloseableHttpClient client
-        (when-not use-kerberos
-          (let [^HttpClientBuilder builder (doto ^HttpClientBuilder (HttpClientBuilder/create)
-                                             (.setDefaultCredentialsProvider basic-credentials-provider)
-                                             (cond-> conn-manager (.setConnectionManager conn-manager))
-                                             (cond-> (and (not conn-manager) @default-connection-manager)
-                                               (.setConnectionManager @default-connection-manager))
-                                             (cond-> (and (:socket-timeout solr-client-options)
-                                                          (< solr-major-version 7))
-                                               (.setDefaultSocketConfig (let [scbuilder
-                                                                              (doto ^SocketConfig$Builder (SocketConfig/custom)
-                                                                                (.setSoTimeout
-                                                                                 (int (:socket-timeout
-                                                                                       solr-client-options))))]
-                                                                          (.build scbuilder))))
-                                             (cond-> authenticator
-                                               (.addInterceptorFirst
-                                                (reify
-                                                    HttpRequestInterceptor
-                                                  (^void process [this ^HttpRequest request ^HttpContext context]
-                                                   (add-authentication authenticator request context))))))]
-            (when (:ssl-trust-store solr-client-options)
-              (when-let [ssl-socket-factory (build-connection-socket-factory solr-client-options)]
-                (.setSSLSocketFactory builder ssl-socket-factory)))
-            (.build builder)))]
-    (make-solr-client (:clean-url (get-url-details url)) client solr-major-version solr-client-options)))
+        credential (when url (get-authenticator url))
+        use-kerberos (and (kerberos-configured?) (nil? credential))
+        opts (merge solr-client-options
+                    {:credential credential
+                     :kerberos? use-kerberos
+                     :conn-manager (or conn-manager @default-connection-manager)})]
+    (make-solr-client (:clean-url (get-url-details url))
+                      nil
+                      solr-major-version
+                      opts)))
+
 
 (defn- make-document [boost-map doc]
   (let [^SolrInputDocument sdoc (SolrInputDocument. (make-array String 0))]
@@ -811,7 +746,7 @@
      :request-handler    Endpoint on Solr, if not /select.
   Values remaining in flags are supplied as params.
   Returns an empty document list and basic metadata in meta of the document list."
-  [^SolrQuery query
+  [query
    {:keys [method request-handler just-return-query?] :as flags}]
   (when (not-empty request-handler)
     (.setRequestHandler query request-handler))
@@ -826,7 +761,7 @@
     (let [method (parse-method method)]
       (try
         (let [^QueryResponse query-results (.query ^SolrClient *connection*
-                                                   ^SolrQuery query
+                                                   query
                                                    ^SolrRequest$METHOD method
                                                    )]
           (with-meta (list) {:query query :query-results-obj query-results}))
@@ -876,7 +811,7 @@
 (defn wrap-debug
   "Insert query debugging information if :debugQuery is truthy in flags."
   [handler]
-  (fn [^SolrQuery query {:keys [debugQuery] :as flags}]
+  (fn [query {:keys [debugQuery] :as flags}]
     (when debugQuery
       (.setParam query "debugQuery" (make-param true)))
     (let [results (handler query (dissoc flags :debugQuery))
@@ -895,7 +830,7 @@
                             where :formatter is optional and is used to format the query.
   Returns a sequence of matching documents"
   [handler]
-  (fn [^SolrQuery query {:keys [fields facet-filters] :as flags}]
+  (fn [query {:keys [fields facet-filters] :as flags}]
     (when (not (empty? fields))
       (cond (string? fields)
             (.setFields query (into-array (str/split fields #",")))
@@ -924,7 +859,7 @@
   "Return highlighting information in the :highlighting entry of result metadata.
    Requires :hl entries in flags."
   [handler]
-  (fn [^SolrQuery query flags]
+  (fn [query flags]
     (let [result (handler query flags)
           query-results-obj (:query-results-obj (meta result))]
       (if query-results-obj
@@ -939,7 +874,7 @@
                             use comma separated lists: this-facet,other-facet.
    Pivots are returned in the :facet-pivot-fields metadata of the result."
   [handler]
-  (fn [^SolrQuery query
+  (fn [query
        {:keys [facet-pivot-fields facet-date-ranges] :as flags}]
     (doseq [field facet-pivot-fields]
       (.addFacetPivotField query (into-array String [field])))
@@ -952,7 +887,7 @@
 (defn wrap-field-statistics
   "Insert field statistics into metadata of a query result.  Requires :stats true and :stats.field entries in flags."
   [handler]
-  (fn [^SolrQuery query flags]
+  (fn [query flags]
     (let [results (handler query flags)
           query-results (:query-results-obj (meta results))]
       (if (and query-results (.getFieldStatsInfo query-results))
@@ -1019,7 +954,7 @@
      facet-heatmap-dist-err-pct  Fraction of geom size to compute grid level.  Defaults to 0.15.
      facet-heatmap-dist-err      Cell error distance to pick grid level indirectly.  See Solr admin manual."
   [handler]
-  (fn [^SolrQuery query {:keys [facet-heatmap facet-heatmap-geom facet-heatmap-grid-level facet-heatmap-dist-err-pct facet-heatmap-dist-err] :as flags}]
+  (fn [query {:keys [facet-heatmap facet-heatmap-geom facet-heatmap-grid-level facet-heatmap-dist-err-pct facet-heatmap-dist-err] :as flags}]
     (if facet-heatmap
       (do
         (.setParam query "facet" true)
@@ -1074,7 +1009,7 @@
      :facet-mincount        Minimum number of docs in a facet for the bucket to be returned.
      :facet-hier-sep        Useful for path hierarchy token faceting.  A regex, such as \\|."
   [handler]
-  (fn [^SolrQuery query
+  (fn [query
        {:keys [facet-fields facet-date-ranges facet-numeric-ranges facet-queries facet-mincount facet-hier-sep facet-key-fields] :as flags}]
     (let [facet-result-formatters (into {} (map #(if (map? %)
                                                    [(:name %) (:result-formatter % identity)]
@@ -1160,7 +1095,7 @@
   "Request collapsed search results be expanded.
    Pass :expand as a field name or a map of expand parameters"
   [handler]
-  (fn [^SolrQuery query {:keys [expand] :as flags}]
+  (fn [query {:keys [expand] :as flags}]
     (when expand
       (.setParam query "expand" true)
       (cond (string? expand)
@@ -1184,7 +1119,7 @@
   "Request search results be collapsed by a given field, passed in the :collapse flag, 
    which can be a string field name or a map containing Solr collapse parameters."
   [handler]
-  (fn [^SolrQuery query {:keys [collapse] :as flags}]
+  (fn [query {:keys [collapse] :as flags}]
     (when collapse
       (cond (string? collapse)
             (.addFilterQuery query (into-array String [(format "{!collapse field=%s}" collapse)]))
@@ -1201,7 +1136,7 @@
    flags must contain a :sort entry that sorts by a unique field if :cursor-mark is enabled.
    returns :next-cursor-mark and :cursor-done (a boolean) in result metadata."
   [handler]
-  (fn [^SolrQuery query {:keys [cursor-mark] :as flags}]
+  (fn [query {:keys [cursor-mark] :as flags}]
     (let [want-cursoring (or (= cursor-mark true) (not (nil? cursor-mark)))]
       (when (and want-cursoring (not (:sort flags)))
         (throw (IllegalArgumentException. "Requesting Solr cursor-mark requires a :sort flag specifying a unique field")))
@@ -1226,7 +1161,7 @@
   [handler & [opts]]
   (let [spellcheck-opts (into {:spellcheck true}
                               (for [[k v] opts :when (re-matches #"spellcheck\..+" (name k))] [k v]))]
-    (fn [^SolrQuery query flags]
+    (fn [query flags]
       (let [result (handler query (merge flags spellcheck-opts))
             query-results (:query-results-obj (meta result))]
         (if query-results
@@ -1256,7 +1191,7 @@
    Injects :suggest true into parameters (use this middleware sparingly).
    If suggest.q is not provided, injects q as suggest.q with leading and trailing * removed."
   [handler & {:keys [suggester-name all-suggesters]}]
-  (fn [^SolrQuery query flags]
+  (fn [query flags]
     (let [result (handler query (merge flags
                                        {:suggest true}
                                        (if (not-empty suggester-name)
@@ -1309,9 +1244,9 @@
   "Searches for documents matching q, which can be a string or an instance of SolrQuery.  See search for details about the flags map.
    Middleware can be provided explicitly, be sources from the :middleware entry in flags, or default to clojure-solr/solr-app."
   [q flags & [middleware]]
-  (let [^SolrQuery query (cond (string? q) (SolrQuery. q)
-                               (instance? SolrQuery q) q
-                               :else (throw (Exception. "q parameter must be a string or SolrQuery")))
+  (let [query (cond (string? q) (impl/new-query (impl/impl) q)
+                    (impl/query? (impl/impl) q) q
+                    :else (throw (Exception. "q parameter must be a string or SolrQuery")))
         middleware (or middleware (:middleware flags) solr-app)]
     (middleware query
                 (assoc (dissoc flags :middleware) :original-flags flags))))
@@ -1394,7 +1329,7 @@
     (.add ^SolrClient *connection* document)))
   
 (defn similar [doc similar-count & {:keys [method]}]
-  (let [^SolrQuery query (SolrQuery. (format "id:%d" (:id doc)))
+  (let [query (impl/new-query (impl/impl) (format "id:%d" (:id doc)))
         method (parse-method method)]
     (.setParam query "mlt" (make-param true))
     (.setParam query "mlt.fl" (make-param "fulltext"))
@@ -1438,7 +1373,7 @@
          fields "score"
          max-query-terms (int 1000)}
     :as params}]
-  (let [query (doto (SolrQuery.)
+  (let [query (doto (impl/new-query (impl/impl) nil)
                 (.setRequestHandler  (str "/" MoreLikeThisParams/MLT))
                 (.set MoreLikeThisParams/MATCH_INCLUDE (make-param match-include?))
                 (.set MoreLikeThisParams/MIN_DOC_FREQ (make-param min-doc-freq))
@@ -1523,15 +1458,24 @@
                  (.set "command" (make-param type)))]
     (.query ^SolrClient *connection* params)))
 
-(defmacro with-connection [conn & body]
-  `(let [old-conn# (if (and (bound? #'*connection*) (.endsWith (.getName (type *connection*)) "EmbeddedSolrServer"))
-                     *connection*
-                     nil)]
-     (binding [*connection* (or old-conn# ~conn)]
-       (try
-         (do ~@body)
-         (finally (when (not old-conn#)
-                    (.close ^SolrClient *connection*)))))))
+(defmacro with-connection
+  "Bind *connection* to conn for the extent of body, then drain and close it.
+
+   If a shared connection is already bound -- one whose lifetime belongs to the
+   process rather than to this scope, such as an embedded Solr server -- it is
+   reused and conn is never evaluated.  A connection declares itself shared by
+   extending clojure-solr.impl/SolrConnection, so no client type is named here."
+  [conn & body]
+  `(let [old# (when (bound? #'*connection*) *connection*)]
+     (if (and old# (shared? old#))
+       (do ~@body)
+       (let [c# ~conn]
+         (binding [*connection* c#]
+           (try
+             (do ~@body)
+             (finally
+               (drain c#)
+               (.close ^SolrClient c#))))))))
 
 #_(defmacro with-connection [conn & body]
   `(binding [*connection* ~conn]
@@ -1547,13 +1491,12 @@
      ~@body))
 
 (defn register-shutdown-hook!
-  "Registers a JVM shutdown hook that drains and closes the given SolrClient.
-   For ConcurrentUpdateSolrClient, calls blockUntilFinished() before close()."
+  "Register a JVM shutdown hook that drains and closes conn.  Buffering clients
+   flush first; others drain to a no-op."
   [^SolrClient conn]
   (.addShutdownHook (Runtime/getRuntime)
     (Thread.
       (fn []
-        (when (instance? ConcurrentUpdateSolrClient conn)
-          (.blockUntilFinished ^ConcurrentUpdateSolrClient conn))
+        (drain conn)
         (.close conn)))))
 

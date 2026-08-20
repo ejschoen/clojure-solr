@@ -1,6 +1,6 @@
 (ns clojure-solr.schema
   (:require [clojure.string :as str])
-  (:import (org.apache.solr.client.solrj.impl HttpSolrClient)
+  (:import
            (org.apache.solr.client.solrj.request.schema SchemaRequest$Fields SchemaRequest$DynamicFields)
            (org.apache.solr.client.solrj.request.schema SchemaRequest$FieldType)
            (org.apache.solr.client.solrj.request.schema SchemaRequest$FieldTypes)
@@ -8,7 +8,7 @@
            (org.apache.solr.client.solrj.response.schema SchemaResponse$FieldTypeResponse FieldTypeRepresentation)
            (org.apache.solr.client.solrj.response.schema SchemaResponse$FieldTypesResponse)
            (org.apache.solr.common SolrInputDocument)
-           (org.apache.solr.client.solrj SolrQuery SolrRequest$METHOD)
+           (org.apache.solr.client.solrj SolrRequest$METHOD)
            (org.apache.solr.common.params ModifiableSolrParams))
   (:import [org.apache.http StatusLine HttpResponse]
            [org.apache.http.client HttpClient]

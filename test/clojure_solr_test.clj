@@ -16,6 +16,11 @@
   (:import [java.nio.charset StandardCharsets]
            [org.apache.commons.codec.binary Base64]))
 
+;; An embedded server wraps a process-lifetime CoreContainer, so a nested
+;; with-connection must reuse it rather than build and close another.  This is
+;; the registration an embedded build performs; clojure-solr never names the class.
+(mark-shared! EmbeddedSolrServer)
+
 (defmethod make-solr-client EmbeddedSolrServer [_  _ major-version solr-client-options]
   (let [cont-expr (case major-version
                     (6 7) `(CoreContainer.)

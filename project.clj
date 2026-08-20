@@ -1,6 +1,8 @@
 (def jackson-version "2.18.0")
 
 (def solr9-version "9.7.0")
+(def solr10-version "10.0.0")
+(def lucene10-version "10.3.2")
 
 ;; Jetty artifacts that solr-solrj pulls in for the Http2SolrClient family.
 ;; clojure-solr builds only the Apache HttpClient-based clients (HttpSolrClient,
@@ -25,7 +27,8 @@
                  [commons-fileupload "1.4" :exclusions [commons-io]]
                  [clj-time "0.11.0" :exclusions [org.clojure/clojure]]]
   :plugins [[lein-pprint "1.3.2"]]
-  :classifiers [["solr9" :solr9]
+  :classifiers [["solr10" :solr10]
+                ["solr9" :solr9]
                 ["solr8" :solr8]
                 ["solr7" :solr7]
                 ["solr6" :solr6]]
@@ -80,6 +83,35 @@
                                            ;; SolrZkClient/ZkStateReader, used by clojure-solr.admin
                                            [org.apache.solr/solr-solrj-zookeeper ~solr9-version
                                             :exclusions ~jetty-exclusions]]}
+             ;; Solr 10 runtime.  solr-solrj 10 declares no Jetty, no ZooKeeper and no
+             ;; Apache HttpClient of its own, so there is nothing to exclude -- the
+             ;; modules are simply not added.  solr-solrj-jetty is deliberately absent:
+             ;; it is needed only for relaxed TLS or Kerberos.
+             :solr10-client {:pom-addition [:properties ["solrj.major.version" "10"]]
+                             :dependencies [[org.apache.solr/solr-solrj ~solr10-version]
+                                            ;; solr-solrj-zookeeper pulls solr-solrj-jetty at runtime
+                                            ;; scope, for CloudSolrClient's Jetty fallback.  clojure-solr
+                                            ;; uses SolrZkClient directly and never builds a
+                                            ;; CloudSolrClient, so excluding it keeps Jetty off the
+                                            ;; classpath -- which is the whole point of the JDK client.
+                                            [org.apache.solr/solr-solrj-zookeeper ~solr10-version
+                                             :exclusions [org.apache.solr/solr-solrj-jetty]]]}
+             ;; Solr 10 build/test profile.  solr-core 10 resolves without its transitive
+             ;; dependencies under Leiningen, so Lucene must be named explicitly.
+             :solr10 {:pom-addition [:properties ["solrj.major.version" "10"]]
+                      :dependencies [[org.apache.solr/solr-solrj ~solr10-version]
+                                     [org.apache.solr/solr-solrj-zookeeper ~solr10-version]
+                                     [org.apache.solr/solr-core ~solr10-version]
+                                     [org.apache.lucene/lucene-core ~lucene10-version]
+                                     [org.apache.lucene/lucene-analysis-common ~lucene10-version]
+                                     [org.apache.lucene/lucene-queries ~lucene10-version]
+                                     [org.apache.lucene/lucene-queryparser ~lucene10-version]
+                                     [org.apache.lucene/lucene-highlighter ~lucene10-version]
+                                     [org.apache.lucene/lucene-grouping ~lucene10-version]
+                                     [org.apache.lucene/lucene-join ~lucene10-version]
+                                     [org.apache.lucene/lucene-misc ~lucene10-version]
+                                     [org.apache.lucene/lucene-suggest ~lucene10-version]
+                                     [org.apache.lucene/lucene-codecs ~lucene10-version]]}
              ;; Build/test profile.  solr-core is here only for the EmbeddedSolrServer
              ;; the test suite runs against; CoreContainer.load builds an Http2SolrClient,
              ;; so Jetty must stay on this classpath.
