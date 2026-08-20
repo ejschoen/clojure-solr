@@ -120,12 +120,50 @@ functions raise an explanatory error rather than failing on a missing class:
 - ``:kerberos`` -- Solr 10 removed hadoop-auth and ``Krb5HttpClientBuilder``.
   ``set-kerberos-credentials`` works on SolrJ 9 only.
 - ``:concurrent-update`` -- the batching client moved to ``solr-solrj-jetty``,
-  which pulls in Jetty 12.  Add that artifact, or batch in the caller.
+  which pulls in Jetty 12.  Note that ``ConcurrentUpdateJettySolrClient$Builder``
+  requires an ``HttpJettySolrClient`` *instance*, so this is not a matter of
+  naming a class: it obliges the caller to run a Jetty client.  Degrade to
+  ``:http``, or batch in the caller.
 - ``:connection-manager`` -- see pooling above.
 - ``:relaxed-hostname-verification`` -- ``:ssl-trust-store :self-signed`` still
   trusts a self-signed certificate, but the JDK client always verifies the
   hostname and offers no way to disable it.  The certificate's subject
   alternative name must match the host being connected to.
+
+Running against embedded Solr 10
+--------------------------------
+
+clojure-solr itself needs only SolrJ, but if your build embeds Solr for testing
+there are four things about Solr 10 that are not API changes and so are easy to
+miss.
+
+**solr-core 10 requires Java 21.**  It is compiled to class file 65, while
+solr-solrj 10 is class file 61.  Applications keep running on Java 17; anything
+loading solr-core needs 21, at build time too if you AOT-compile a namespace that
+imports ``EmbeddedSolrServer``.
+
+**solr-core 10.0.0's published POM is invalid.**  Five Jackson dependencies carry
+no version and nothing supplies one (SOLR-18185, open at time of writing), so
+Maven and Leiningen both resolve it to a bare jar with no transitive dependencies
+at all.  Either name its whole dependency closure yourself, or republish the POM
+with the ``jackson-bom`` import that ``solr-solrj`` already carries.
+
+**Solr 10 ignores** ``<lib>`` **directives in solrconfig.xml.**  ``SolrConfig``
+has no lib handling left.  Put jars in ``<instanceDir>/lib``, which
+``SolrResourceLoader`` still adds.  This fails silently -- the plugin class is
+simply not found.
+
+**Embedded Solr 10 needs Jetty on the classpath**, even though clojure-solr does
+not: ``CoreContainer``'s constructor initialises ``TraceUtils``, whose static
+initialiser links against ``org.eclipse.jetty.client.Request``.  Add
+``solr-solrj-jetty`` and ``org.eclipse.jetty/jetty-client``.  Only the
+application classpath comes out Jetty-free.
+
+Two SolrJ API details bite code that builds an embedded server:
+``CoreContainer.getSolrHome()`` returns ``String`` on Solr 9 and
+``java.nio.file.Path`` on Solr 10, and ``HttpJdkSolrClient`` rejects use after
+close where the Apache client tolerated it -- so a connection cache must not hand
+out a client something else has closed.
 
 Solr dependencies and Jetty
 ---------------------------
