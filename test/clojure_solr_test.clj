@@ -733,6 +733,7 @@
 ;; Kerberos configuration lifecycle tests (no KDC required)
 
 (deftest test-kerberos-credentials-lifecycle
+ (when (clojure-solr.impl/supports? :kerberos)
   (let [krb5-content (.getBytes "[libdefaults]\n  default_realm = TEST.REALM\n" "UTF-8")
         keytab-content (byte-array [0x05 0x02 0x00])]
     (try
@@ -754,9 +755,10 @@
         (clear-kerberos-credentials)
         (is (not (kerberos-configured?)))
         (is (nil? (System/getProperty "java.security.krb5.conf")))
-        (is (nil? (System/getProperty "java.security.auth.login.config")))))))
+        (is (nil? (System/getProperty "java.security.auth.login.config"))))))))
 
 (deftest test-kerberos-with-file-paths
+ (when (clojure-solr.impl/supports? :kerberos)
   (let [krb5-file (java.io.File/createTempFile "test-krb5-" ".conf")
         keytab-file (java.io.File/createTempFile "test-keytab-" ".keytab")]
     (try
@@ -771,9 +773,10 @@
       (finally
         (clear-kerberos-credentials)
         (.delete krb5-file)
-        (.delete keytab-file)))))
+        (.delete keytab-file))))))
 
 (deftest test-kerberos-reconfiguration
+ (when (clojure-solr.impl/supports? :kerberos)
   (let [content1 (.getBytes "[libdefaults]\n  default_realm = REALM1\n" "UTF-8")
         content2 (.getBytes "[libdefaults]\n  default_realm = REALM2\n" "UTF-8")
         keytab (.getBytes "dummy-keytab" "UTF-8")]
@@ -787,7 +790,20 @@
         (let [jaas-content (slurp (System/getProperty "java.security.auth.login.config"))]
           (is (.contains jaas-content "user@REALM2"))))
       (finally
-        (clear-kerberos-credentials)))))
+        (clear-kerberos-credentials))))))
+
+(deftest test-kerberos-unsupported-raises-clearly
+  ;; The other side of the same capability: where Kerberos is gone, asking for it
+  ;; must say so rather than surface as a missing class somewhere further in.
+  (when-not (clojure-solr.impl/supports? :kerberos)
+    (let [e (try (set-kerberos-credentials "user@TEST.REALM"
+                                           (.getBytes "[libdefaults]\n" "UTF-8")
+                                           (byte-array [0x05 0x02 0x00]))
+                 nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+      (is (some? e) "set-kerberos-credentials must raise on a SolrJ without Kerberos")
+      (is (= :kerberos (:feature (ex-data e))))
+      (is (re-find #"Solr 10 removed" (.getMessage e))))))
 
 (deftest test-connection-protocol-reexports-dispatch
   ;; clojure-solr re-exports the SolrConnection protocol.  Aliasing the protocol
