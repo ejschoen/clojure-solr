@@ -12,13 +12,113 @@ project.clj file:
 
 ::
 
-    [cc.artifice/clojure-solr "4.1.3"]
+    [cc.artifice/clojure-solr "6.0.0-SNAPSHOT"]
 
 Note: Starting with release 3.0.0, Clojure and Solr dependencies are not part of the basic project definition.
 Use lein with-profile +1.8,+solr7 repl (or test) for example to include Clojure 1.8 and Solr 7.7.3 dependencies.
 
-Use :classifier option solr6, solr7, or solr8 in other Leiningen projects to get the appropriate builds,
+Use :classifier option solr6, solr7, solr8, solr9 or solr10 in other Leiningen projects to get the appropriate builds,
 and provide Clojure and Solr (solr-core, solr-solrj) dependencies in the project that uses clojure-solr.
+
+Upgrading to 6.0.0
+------------------
+
+6.0.0 makes clojure-solr work against either SolrJ 9 or SolrJ 10 from one
+artifact.  SolrJ 10 removed the Apache HttpClient-based clients and moved
+``SolrQuery`` to another package, so anything in this library that named those
+classes had to move behind ``clojure-solr.impl``.  The implementation is chosen
+at load time; you do not pick one.
+
+Most code needs no change.  ``connect``, ``with-connection``, ``search``,
+``search*``, ``add-document!``, ``commit!`` and the rest keep their signatures
+and behaviour.  What follows is the complete list of what does change.
+
+**Client type is a keyword, not a class.**  ``:type`` no longer takes a class
+object, so callers stop importing a class that a given SolrJ may not have::
+
+    ;; before
+    (:import (org.apache.solr.client.solrj.impl ConcurrentUpdateSolrClient))
+    (connect url nil {:type ConcurrentUpdateSolrClient :queue-size 100})
+
+    ;; after
+    (connect url nil {:type :concurrent-update :queue-size 100})
+
+Built-in types are ``:http`` (the default) and ``:concurrent-update``.  Register
+others with ``defmethod clojure-solr/make-solr-client``.
+
+**Capabilities instead of type tests.**  Two things callers used to determine by
+type are now protocol methods in ``clojure-solr.impl``::
+
+    ;; before
+    (when (instance? ConcurrentUpdateSolrClient client)
+      (.blockUntilFinished client))
+    (.close client)
+
+    ;; after
+    (clojure-solr.impl/drain client)
+    (.close client)
+
+``register-shutdown-hook!`` drains automatically, so callers using it need no
+change at all.
+
+**Embedded builds must declare their server shared.**  ``with-connection`` no
+longer recognises an embedded server by matching on its class name.  A build
+that swaps in ``EmbeddedSolrServer`` registers it once, alongside its
+``make-solr-client`` method::
+
+    (clojure-solr/mark-shared! EmbeddedSolrServer)
+
+Without this a nested ``with-connection`` rebuilds the server rather than
+reusing the bound one, which can fail on a solr-home mismatch.
+
+**Base URL comes from the connection protocol.**  Use
+``(clojure-solr.impl/base-url conn)`` rather than ``(.getBaseURL conn)``.  The
+underlying client differs between SolrJ versions and may be wrapped.
+
+**Credentials are data.**  ``(set-credentials uri name password)`` is unchanged.
+The two-argument form now takes a credential map -- build one with
+``basic-credentials`` or ``token-credentials`` -- rather than an Apache object.
+Objects satisfying ``SolrAuthentication`` still work on SolrJ 9 only, since they
+are handed an Apache request and context that SolrJ 10 does not have.
+
+**Pooling is deprecated.**  ``clojure-solr.pooling`` is removed; it had no
+callers.  Instead of assembling an Apache connection manager, pass options to
+``connect``::
+
+    ;; before
+    (connect url (doto (PoolingHttpClientConnectionManager. 300 TimeUnit/SECONDS)
+                   (.setDefaultMaxPerRoute 8)
+                   (.setMaxTotal 40)))
+
+    ;; after
+    (connect url {:max-connections-per-host 8
+                  :max-connections-total 40      ; Solr 9 only
+                  :time-to-live-seconds 300})    ; Solr 9 only
+
+On SolrJ 10 the JDK client pools and reclaims idle connections by itself, so the
+last two are reported once and ignored.  ``set-default-connection-manager`` and
+``build-connection-socket-factory`` remain for SolrJ 9; the latter raises on
+SolrJ 10, where there is no Apache socket factory to build.
+
+**If you construct a SolrQuery yourself**, the class moved packages in Solr 10.
+Use ``(clojure-solr.impl/new-query (clojure-solr.impl/impl) "q")``, or pass a
+query string to ``search*`` and let the library build it.
+
+What SolrJ 10 does not support
+------------------------------
+
+``clojure-solr.impl/supports?`` answers these at runtime, and the corresponding
+functions raise an explanatory error rather than failing on a missing class:
+
+- ``:kerberos`` -- Solr 10 removed hadoop-auth and ``Krb5HttpClientBuilder``.
+  ``set-kerberos-credentials`` works on SolrJ 9 only.
+- ``:concurrent-update`` -- the batching client moved to ``solr-solrj-jetty``,
+  which pulls in Jetty 12.  Add that artifact, or batch in the caller.
+- ``:connection-manager`` -- see pooling above.
+- ``:relaxed-hostname-verification`` -- ``:ssl-trust-store :self-signed`` still
+  trusts a self-signed certificate, but the JDK client always verifies the
+  hostname and offers no way to disable it.  The certificate's subject
+  alternative name must match the host being connected to.
 
 Solr dependencies and Jetty
 ---------------------------
