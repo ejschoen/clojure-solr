@@ -4,7 +4,7 @@
             [clojure.string :as str])
   (:import (java.util.jar Manifest))
   (:import (org.apache.solr.client.solrj.embedded EmbeddedSolrServer)
-           (org.apache.solr.client.solrj SolrQuery SolrRequest$METHOD SolrClient))
+           (org.apache.solr.client.solrj SolrRequest$METHOD SolrClient))
   (:import (org.apache.solr.core CoreContainer))
   (:require [clj-time.core :as t])
   (:require [clj-time.coerce :as tcoerce])
@@ -24,7 +24,7 @@
 (defmethod make-solr-client EmbeddedSolrServer [_  _ major-version solr-client-options]
   (let [cont-expr (case major-version
                     (6 7) `(CoreContainer.)
-                    (8 9) (let [home-dir (:home-dir solr-client-options)]
+                    (8 9 10) (let [home-dir (:home-dir solr-client-options)]
                         `(CoreContainer. (.getPath (java.nio.file.FileSystems/getDefault)
                                                    ~home-dir
                                                    (make-array String 0))
@@ -469,7 +469,7 @@
   (commit!)
   (let [query-counter (atom 0)
         wrap-counter-middleware (fn [handler]
-                                  (fn [^SolrQuery query flags]
+                                  (fn [query flags]
                                     (swap! query-counter inc)
                                     (handler query flags)))
         result (lazy-search* "Levenshtein" {:df "fulltext" :rows 10
