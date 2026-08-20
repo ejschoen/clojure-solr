@@ -115,11 +115,37 @@
     (when max-connections-per-host (.withMaxConnectionsPerHost b (int max-connections-per-host)))
     (.build b)))
 
+(defn- authenticating-client
+  "Wrap a client so each outgoing request carries the connection's credential.
+
+   SolrClient declares exactly one abstract method, request(SolrRequest, String),
+   and every convenience method funnels through it -- so this single override
+   also covers .query, .add, .commit, .deleteById and callers doing their own
+   interop on *connection*.
+
+   Credentials resolve per connection but are evaluated per request, which is
+   what a rotating bearer token needs and what a batching client can safely
+   honour.  SolrConnection is delegated explicitly; a proxy would otherwise
+   inherit the SolrClient defaults and silently report the wrong thing."
+  ^SolrClient [^SolrClient delegate credential]
+  (proxy [SolrClient clojure_solr.impl.SolrConnection] []
+    (request [req collection]
+      (decorate-request! req credential)
+      (.request delegate ^SolrRequest req ^String collection))
+    (close [] (.close delegate))
+    (drain [] (impl/drain delegate))
+    (shared_QMARK_ [] (impl/shared? delegate))
+    (base_url [] (impl/base-url delegate))
+    (unwrap [] delegate)))
+
 (defrecord Solr10Impl []
   impl/SolrImpl
   (make-client [_ url opts]
     (case (:type opts :http)
-      :http (jdk-client url (merge opts (pool-options (:conn-manager opts))))
+      :http (let [c (jdk-client url (merge opts (pool-options (:conn-manager opts))))]
+              ;; Only wrap when there is something to apply: an unwrapped client
+              ;; keeps interop and protocol dispatch exactly as SolrJ defines it.
+              (if-let [cred (:credential opts)] (authenticating-client c cred) c))
       :concurrent-update
       (impl/unsupported! :concurrent-update
                          (str "SolrJ 10's batching client is ConcurrentUpdateJettySolrClient, "
