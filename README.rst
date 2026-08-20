@@ -55,7 +55,7 @@ type are now protocol methods in ``clojure-solr.impl``::
     (.close client)
 
     ;; after
-    (clojure-solr.impl/drain client)
+    (clojure-solr/drain client)
     (.close client)
 
 ``register-shutdown-hook!`` drains automatically, so callers using it need no
@@ -72,8 +72,13 @@ Without this a nested ``with-connection`` rebuilds the server rather than
 reusing the bound one, which can fail on a solr-home mismatch.
 
 **Base URL comes from the connection protocol.**  Use
-``(clojure-solr.impl/base-url conn)`` rather than ``(.getBaseURL conn)``.  The
+``(clojure-solr/base-url conn)`` rather than ``(.getBaseURL conn)``.  The
 underlying client differs between SolrJ versions and may be wrapped.
+
+``drain``, ``shared?``, ``base-url`` and ``unwrap`` are the ``SolrConnection``
+protocol, re-exported from ``clojure-solr`` so that replacing a type test does
+not mean requiring ``clojure-solr.impl`` as well.  ``shared?`` is the one to use
+where code closed a connection only when it was not an embedded server.
 
 **Credentials are data.**  ``(set-credentials uri name password)`` is unchanged.
 The two-argument form now takes a credential map -- build one with
@@ -102,7 +107,9 @@ SolrJ 10, where there is no Apache socket factory to build.
 
 **If you construct a SolrQuery yourself**, the class moved packages in Solr 10.
 Use ``(clojure-solr.impl/new-query (clojure-solr.impl/impl) "q")``, or pass a
-query string to ``search*`` and let the library build it.
+query string to ``search*`` and let the library build it.  This one stays on
+``clojure-solr.impl``: it is a property of the SolrJ in use, not of a
+connection.
 
 What SolrJ 10 does not support
 ------------------------------

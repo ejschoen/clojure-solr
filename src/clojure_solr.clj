@@ -4,8 +4,9 @@
   (:require [clj-time.core :as t])
   (:require [clj-time.format :as tformat])
   (:require [clj-time.coerce :as tcoerce])
-  (:require [clojure-solr.impl :as impl
-             :refer [drain shared? base-url unwrap]])
+  ;; Deliberately not :refer-ed -- these four are re-exported below as vars of
+  ;; this namespace, so that callers can say clojure-solr/drain.
+  (:require [clojure-solr.impl :as impl])
   (:import (java.io File FileOutputStream)
            (java.net URI)
            (java.util Base64 HashMap List ArrayList Map)
@@ -405,6 +406,34 @@
    clojure-solr.impl/mark-shared!.  Embedded-Solr builds call this so that a
    nested with-connection reuses the bound server instead of rebuilding it."
   impl/mark-shared!)
+
+;;; The SolrConnection protocol, re-exported so that callers replacing a type
+;;; test do not have to require clojure-solr.impl as well.  These are the same
+;;; vars; :refer alone would not have been enough, since a referred var is not
+;;; reachable as clojure-solr/drain from another namespace.
+
+(def drain
+  "Block until buffered updates have been flushed; see
+   clojure-solr.impl/drain.  Replaces testing a connection's class to decide
+   whether to call .blockUntilFinished."
+  impl/drain)
+
+(def shared?
+  "True if this connection is a process-lifetime resource; see
+   clojure-solr.impl/shared?.  Replaces testing a connection's class to decide
+   whether it is safe to close."
+  impl/shared?)
+
+(def base-url
+  "The collection URL this connection talks to; see clojure-solr.impl/base-url.
+   Replaces interop on .getBaseURL, which names a class that differs between
+   SolrJ versions and is not exposed by the Solr 10 authenticating wrapper."
+  impl/base-url)
+
+(def unwrap
+  "The underlying SolrClient, with any clojure-solr decoration removed; see
+   clojure-solr.impl/unwrap."
+  impl/unwrap)
 
 (defmulti make-solr-client
   "Extension point for building a SolrClient.  Dispatches on (:type opts).
@@ -1474,14 +1503,14 @@
    extending clojure-solr.impl/SolrConnection, so no client type is named here."
   [conn & body]
   `(let [old# (when (bound? #'*connection*) *connection*)]
-     (if (and old# (shared? old#))
+     (if (and old# (impl/shared? old#))
        (do ~@body)
        (let [c# ~conn]
          (binding [*connection* c#]
            (try
              (do ~@body)
              (finally
-               (drain c#)
+               (impl/drain c#)
                (.close ^SolrClient c#))))))))
 
 #_(defmacro with-connection [conn & body]
@@ -1504,6 +1533,6 @@
   (.addShutdownHook (Runtime/getRuntime)
     (Thread.
       (fn []
-        (drain conn)
+        (impl/drain conn)
         (.close conn)))))
 
