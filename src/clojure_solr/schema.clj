@@ -10,12 +10,9 @@
            (org.apache.solr.common SolrInputDocument)
            (org.apache.solr.client.solrj SolrRequest$METHOD)
            (org.apache.solr.common.params ModifiableSolrParams))
-  (:import [org.apache.http StatusLine HttpResponse]
-           [org.apache.http.client HttpClient]
-           [org.apache.http.client.methods HttpPost HttpGet]
-           [org.apache.http.entity ByteArrayEntity]
-           [org.apache.http.util EntityUtils])
-  (:require [clojure-solr :as solr]))
+  (:require [clojure-solr :as solr])
+  (:require [clojure-solr.request :as req])
+  (:require [clojure-solr.impl :as impl]))
 
 
 (defn ^FieldTypeRepresentation get-field-type
@@ -40,27 +37,18 @@
   ([]
    (get-schema "json"))
   ([accept-type]
-   (let [^HttpClient client (.getHttpClient solr/*connection*)
-         [_ solr-server-url collection-or-core] (re-matches #"(https?://.+/solr)/([^/]+)(?:/.+)?" (.getBaseURL solr/*connection*))]
-     (if solr-server-url
-       (let [url (str solr-server-url "/" collection-or-core "/schema?wt=" accept-type)
-             ^HttpGet get (HttpGet. url)
-             ^HttpResponse response (.execute client get)]
-         (if (>= (.getStatusCode ^StatusLine (.getStatusLine response)) 400)
-           (let [entity (.getEntity response)
-                 content-type (.getValue (.getContentType entity))
-                 [_ content-type-basic] (re-matches #"([^;]+)(?:;.+)?" content-type) ]
-             (throw (ex-info (format "Solr request failure from %s" url)
-                             {:status (.getStatusCode (.getStatusLine response))
-                              :content-type content-type
-                              :body (if (#{"text/plain" "text/html" "application/json"} content-type-basic)
-                                      (EntityUtils/toString entity)
-                                      (EntityUtils/toByteArray entity))})))
-           (let [entity (.getEntity response)
-                 content-type (.getValue (.getContentType entity))]
-             {:status (.getStatusCode (.getStatusLine response))
-              :content-type content-type
-              :body (EntityUtils/toString entity)})))))))
+   ;; The connection already points at the collection or core, so the path is
+   ;; just /schema -- it resolves against the client's base URL.  The old code
+   ;; regex-split the base URL and rebuilt the same thing.
+   (let [{:keys [status body]}
+         (req/request-stream solr/*connection* :get "/schema"
+                             {:params {:wt accept-type}})]
+     {:status status
+      :content-type (case accept-type
+                      "json" "application/json"
+                      ("xml" "schema.xml") "application/xml"
+                      nil)
+      :body body})))
    
 (defn coerce-to-clojure
   [solr-object]

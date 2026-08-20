@@ -16,7 +16,8 @@
            (javax.net.ssl SSLContext)
            (org.apache.solr.client.solrj SolrQuery)
            (org.apache.solr.client.solrj.impl HttpSolrClient HttpSolrClient$Builder HttpClientUtil
-                                              ConcurrentUpdateSolrClient ConcurrentUpdateSolrClient$Builder)))
+                                              ConcurrentUpdateSolrClient ConcurrentUpdateSolrClient$Builder
+                                              InputStreamResponseParser)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Capabilities of the clients this namespace can build
@@ -197,6 +198,7 @@
         (throw (ex-info "Unknown Solr client type" {:type (:type opts)})))))
   (new-query [_ q] (if q (SolrQuery. ^String q) (SolrQuery.)))
   (query? [_ x] (instance? SolrQuery x))
+  (stream-response-parser [_ writer-type] (InputStreamResponseParser. writer-type))
   (capabilities [_]
     #{:kerberos :connection-manager :concurrent-update :relaxed-hostname-verification}))
 

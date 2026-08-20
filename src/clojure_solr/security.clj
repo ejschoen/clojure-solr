@@ -1,18 +1,14 @@
 (ns clojure-solr.security
   (:use [clojure-solr :only [*connection*]])
   (:require [clojure-solr.admin :as solradmin])
+  (:require [clojure-solr.request :as req])
   (:require [clojure.pprint :as pprint]
             [clojure.string :as str])
   (:import [java.nio.charset StandardCharsets]
            [java.security MessageDigest NoSuchAlgorithmException SecureRandom]
            [java.util Random]
            [org.apache.commons.codec.binary Base64]
-           [org.apache.solr.client.solrj.impl HttpSolrClient]
-           [org.apache.http StatusLine HttpResponse]
-           [org.apache.http.client HttpClient]
-           [org.apache.http.client.methods HttpPost]
-           [org.apache.http.entity ByteArrayEntity]
-           [org.apache.http.util EntityUtils]))
+           ))
 
 (def ^:private VALID-CHARS
   (concat
@@ -224,28 +220,17 @@
   {:to-bytes identity})
 
 
-(defn security-request [endpoint body]
+(defn security-request
   "Make a request to Solr's /admin/authentication or /admin/authorization endpoint.
-   Body can be a string, byte array, or type that implements
-   ToBytesPayload."
-  (let [^HttpClient client (.getHttpClient *connection*)
-        [_ solr-server-url] (re-matches #"(https?://.+/solr)(?:/.+)?" (.getBaseURL *connection*))]
-    (if solr-server-url
-      (let [^HttpPost post (doto (HttpPost. (str solr-server-url endpoint))
-                             (.setHeader "Content-Type" "application-json")
-                             (.setEntity (ByteArrayEntity. (to-bytes body))))
-            ^HttpResponse response (.execute client post)]
-        (if (>= (.getStatusCode ^StatusLine (.getStatusLine response)) 400)
-          (let [entity (.getEntity response)
-                content-type (.getValue (.getContentType entity))
-                [_ content-type-basic] (re-matches #"([^;]+)(?:;.+)?" content-type) ]
-            (throw (ex-info "Solr request failure"
-                            {:status (.getStatusCode (.getStatusLine response))
-                             :content-type content-type
-                             :body (if (#{"text/plain" "text/html" "application/json"} content-type-basic)
-                                     (EntityUtils/toString entity)
-                                     (EntityUtils/toByteArray entity))})))
-          true)))))
+   Body can be a string, byte array, or type that implements ToBytesPayload.
+
+   The endpoint is resolved against the Solr root, so *connection* may be bound
+   to a collection URL without affecting where this lands.  SolrJ raises on a
+   non-2xx response rather than returning a status."
+  [endpoint body]
+  (req/request *connection* :post endpoint
+               {:content (to-bytes body) :content-type "application/json"})
+  true)
 
 (defn authentication-request
   "Make a request to Solr's admin/authentication endpoint.

@@ -69,6 +69,10 @@
      moved packages in Solr 10, so callers must never name it.")
   (query? [this x]
     "True if x is this SolrJ's SolrQuery.")
+  (stream-response-parser [this writer-type]
+    "A ResponseParser that yields the raw response stream rather than parsing it,
+     advertising writer-type (\"json\", \"xml\", ...) as the wt.  The class moved
+     packages in Solr 10, so callers must not name it.")
   (capabilities [this]
     "Set of supported features, from #{:kerberos :connection-manager
      :concurrent-update :relaxed-hostname-verification}.  Callers should check

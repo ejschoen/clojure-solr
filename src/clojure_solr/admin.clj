@@ -2,8 +2,8 @@
   (:require [clojure.string :as str]
             [clojure.pprint :as pprint]
             [clojure.java.io :as io])
-  (:require [clj-http.client :as http])
   (:require [clojure-solr :as solr])
+  (:require [clojure-solr.request :as req])
   (:import [java.util Properties])
   (:import [org.apache.solr.common.util SimpleOrderedMap NamedList])
   (:import [org.apache.solr.client.solrj.request CoreAdminRequest]
@@ -31,12 +31,6 @@
             CollectionAdminResponse])
   ;;(:import [org.apache.solr.cloud ZkController])
   (:import [org.apache.solr.common.cloud SolrZkClient ZkNodeProps ZkStateReader])
-  (:import [org.apache.http.client HttpClient]
-           [org.apache.http.client.methods HttpPost HttpGet]
-           [org.apache.http.entity InputStreamEntity StringEntity ContentType]
-           [org.apache.http HttpRequest]
-           [org.apache.http.util EntityUtils]
-           )
   (:import [java.util.zip ZipInputStream ZipEntry ZipOutputStream]
            [java.io File InputStream ByteArrayInputStream ByteArrayOutputStream]
            [java.nio.file Path Paths Files LinkOption OpenOption])
@@ -47,28 +41,56 @@
        true
        (catch Throwable _ false)))
 
+(defn- slurp-bytes
+  "Read an InputStream fully into a byte array.  GenericSolrRequest takes a byte
+   array, so where the Apache path could stream, large configsets and blobs are
+   now buffered in memory."
+  ^bytes [^java.io.InputStream in]
+  (let [out (java.io.ByteArrayOutputStream.)]
+    (io/copy in out)
+    (.toByteArray out)))
+
 (defn get-cheshire-parse-string
   []
   (ns-resolve (symbol "cheshire.core") (symbol "parse-string")))
 
 
+(defn- ->string-map
+  "NamedList or Map to a Clojure map with the original string keys."
+  [x]
+  (cond (instance? NamedList x)
+        (into {} (for [^java.util.Map$Entry e (iterator-seq (.iterator ^NamedList x))]
+                   [(.getKey e) (.getValue e)]))
+        (instance? java.util.Map x) (into {} x)
+        :else x))
+
+(defn- core-status-entries
+  "Per-core status, read off the raw response rather than CoreAdminResponse's
+   getCoreStatus.  That accessor returned a NamedList of NamedLists on SolrJ 9
+   and returns a Map of typed CoreStatusResponse$SingleCoreData on SolrJ 10; the
+   underlying response is a NamedList on both."
+  [^CoreAdminResponse response]
+  (->string-map (.get (.getResponse response) "status")))
+
+(defn- core-status->map
+  [core]
+  (let [m (->string-map core)]
+    (cond-> m (contains? m "index") (assoc "index" (->string-map (get m "index"))))))
+
 (defn list-cores
-  "List loaded cores in a standalone Solr"
+  "List loaded cores in a standalone Solr.  Keys are strings, as before."
   []
   (let [^CoreAdminRequest request (doto (CoreAdminRequest.)
                                     (.setAction CoreAdminParams$CoreAdminAction/STATUS))
-        ^CoreAdminResponse response (.process request solr/*connection*)
-        core-status (.getCoreStatus response)]
-    (for [[_ core] (iterator-seq (.iterator core-status))
-          :let [core-map (into {} core)
-                index-map (into {} (get core-map "index"))]]
-      (assoc core-map "index" index-map))))
-    
+        ^CoreAdminResponse response (.process request solr/*connection*)]
+    (for [[_ core] (core-status-entries response)]
+      (core-status->map core))))
+
 (defn get-core-status
   "Get core status in a standalone Solr"
   [name]
-  (-> (into {} (.getCoreStatus (CoreAdminRequest/getStatus name solr/*connection*) name))
-      (update-in ["index"] #(into {} %))))
+  (core-status->map (get (core-status-entries (CoreAdminRequest/getStatus name solr/*connection*))
+                         name)))
 
 (defn- process-core-admin-response
   [^CoreAdminResponse response]
@@ -183,31 +205,15 @@
 
 (defmethod upload-config-set InputStream
   [name zipstream & [opts]]
-  (let [base-url (.getBaseURL solr/*connection*)
-        base-client (.getHttpClient (solr/connect base-url))
-        upload-url (str base-url
-                        "/admin/configs?action=UPLOAD&name="
-                        name
-                        (if (:overwrite opts)
-                          "&overwrite=true"
-                          "")
-                        (if (:cleanup opts)
-                          "&cleanup=true"
-                          "")
-                        (if (:filePath opts)
-                          (str "&filePath=" (:filePath opts))
-                          ""))]
-    (let [entity (doto (InputStreamEntity. zipstream -1)
-                   (.setContentType "binary/octet-stream"))
-          post (doto (HttpPost. upload-url)
-                 (.setEntity entity))
-          response (.execute base-client post)
-          status (.getStatusCode (.getStatusLine response))
-          body (EntityUtils/toString (.getEntity response))]
-      (solr/trace (format "upload-config-set status %d reason %s" status body))
-      (if (>= status 400)
-        (throw (ex-info body {:response response :status status}))
-      true))))
+  (let [resp (req/request-clj solr/*connection* :post "/admin/configs"
+                              {:params (cond-> {:action "UPLOAD" :name name}
+                                         (:overwrite opts) (assoc :overwrite true)
+                                         (:cleanup opts)   (assoc :cleanup true)
+                                         (:filePath opts)  (assoc :filePath (:filePath opts)))
+                               :content (slurp-bytes zipstream)
+                               :content-type "application/octet-stream"})]
+    (solr/trace (format "upload-config-set %s" (pr-str resp)))
+    true))
 
 (defn- map->Properties
   [properties]
@@ -401,25 +407,10 @@
 
 (defn get-collection-overlay
   [collection & {:keys [as]}]
-  (let [base-url (.getBaseURL solr/*connection*)
-        base-client (.getHttpClient (solr/connect base-url))
-        overlay-url (str base-url "/" collection "/config/overlay")
-        http-get (HttpGet. overlay-url)
-        response (.execute base-client http-get)]
-    (if (>= (.getStatusCode (.getStatusLine response)) 300)
-      (throw (ex-info "Failed"
-                      {:reason (.getReasonPhrase (.getStatusLine response))
-                       :success false
-                       :status (.getStatusCode (.getStatusLine response))}))
-      (let [body (EntityUtils/toString (.getEntity response))]
-        (case as
-            :string body
-            :json (if json-enabled?
-                    (if-let [parse-string (get-cheshire-parse-string)]
-                      (let [overlay (get (parse-string body true) :overlay)]
-                        overlay)
-                      (throw (IllegalStateException. "Missing #'cheshire.core/parse-string")))
-                    (throw (IllegalStateException. "cheshire is not loaded"))))))))
+  (let [resp (req/request solr/*connection* :get (str "/" collection "/config/overlay"))]
+    (case as
+      :string (req/->json-string resp)
+      (:overlay (req/->clj resp)))))
 
 
 (defn solr-zk-client-factory-builder
@@ -561,23 +552,10 @@
 
 (defn get-system-info
   [&{:keys [as] :or {as (if json-enabled? :json :string)}}]
-  (let [base-url (.getBaseURL solr/*connection*)
-        base-client (.getHttpClient (solr/connect base-url))
-        info-url (str base-url "/admin/info/system?wt=json")]
-    (let [req (HttpGet. info-url)
-          response (.execute base-client req)
-          status (.getStatusCode (.getStatusLine response))
-          body (EntityUtils/toString (.getEntity response))]
-      (if (>= status 400)
-        (throw (ex-info body {:response response :status status}))
-        (case as
-          :string body
-          :json (if json-enabled?
-                  (if-let [parse-string (get-cheshire-parse-string)]
-                    (parse-string body true)
-                    (throw (IllegalStateException. "Missing #'cheshire.core/parse-string")))
-                  (throw (IllegalStateException. "cheshire is not loaded.")))
-          body)))))
+  (let [resp (req/request solr/*connection* :get "/admin/info/system")]
+    (case as
+      :string (req/->json-string resp)
+      (req/->clj resp))))
 
 (defmulti upload-blob (fn [name data] (type data)))
 
@@ -589,95 +567,55 @@
   (upload-blob name (Paths/get path (make-array String 0))))
 
 (defmethod upload-blob InputStream [name data]
-  (let [base-url (.getBaseURL solr/*connection*)
-        base-client (.getHttpClient (solr/connect base-url))
-        upload-url (str base-url "/.system/blob/" name)]
-    (let [entity (doto (InputStreamEntity. data -1)
-                   (.setContentType "binary/octet-stream"))
-          post (doto (HttpPost. upload-url)
-                 (.setEntity entity))
-          response (.execute base-client post)
-          status (.getStatusCode (.getStatusLine response))
-          body (EntityUtils/toString (.getEntity response))]
-      (solr/trace (format "upload-blob status %d reason %s" status body))
-      (if (>= status 400)
-        (throw (ex-info body {:response response :status status}))
-        true))))
+  (let [resp (req/request-clj solr/*connection* :post (str "/.system/blob/" name)
+                              {:content (slurp-bytes data)
+                               :content-type "application/octet-stream"})]
+    (solr/trace (format "upload-blob %s" (pr-str resp)))
+    true))
 
 (defn list-blobs [& {:keys [name as] :or {as :string}}]
-  (let [base-url (.getBaseURL solr/*connection*)
-        base-client (.getHttpClient (solr/connect base-url))
-        list-url (if name
-                     (str base-url "/.system/blob/" name "?omitHeader=true")
-                     (str base-url "/.system/blob?omitHeader=true"))
-        get (HttpGet. list-url)
-        response (.execute base-client get)
-        body (EntityUtils/toString (.getEntity response))]
-    (case (.getStatusCode (.getStatusLine response))
-      200 (case as
-            :string body
-            :json (if json-enabled?
-                    (if-let [parse-string (get-cheshire-parse-string)]
-                      (filter #(:blobName %) (get-in (parse-string body true) [:response :docs]))
-                      (throw (IllegalStateException. "Missing #'cheshire.core/parse-string")))
-                    (throw (IllegalStateException. "cheshire is not loaded"))))
-      404 []
-      (throw (ex-info (.getReasonPhrase (.getStatusLine response))
-                      {:reason (.getReasonPhrase (.getStatusLine response))
-                       :status (.getStatusCode (.getStatusLine response))})))))
+  (let [path (if name (str "/.system/blob/" name) "/.system/blob")
+        resp (try (req/request solr/*connection* :get path {:params {:omitHeader true}})
+                  ;; No .system collection means no blob store; that is an empty
+                  ;; list, not an error.  RemoteSolrException moved to a new class
+                  ;; in Solr 10, but both extend SolrException and carry .code.
+                  (catch org.apache.solr.common.SolrException e
+                    (if (= 404 (.code e)) ::missing (throw e))))]
+    (if (= resp ::missing)
+      []
+      (case as
+        :string (req/->json-string resp)
+        (filter :blobName (get-in (req/->clj resp) [:response :docs]))))))
 
-(defn- string-post
-  [client url body content-type]
-  (let [post (doto (HttpPost. url)
-               (.setEntity (doto (StringEntity. body)
-                             (.setContentType content-type))))
-        response (.execute client post)]
-    (if (>= (.getStatusCode (.getStatusLine response)) 300)
-      (throw (ex-info "Failed"
-                      {:reason (.getReasonPhrase (.getStatusLine response))
-                       :success false
-                       :status (.getStatusCode (.getStatusLine response))}))
-      {:success true
-       :response response})))
+(defn- config-post
+  "POST a JSON config command to a collection's /config endpoint."
+  [collection json]
+  (req/request solr/*connection* :post (format "/%s/config" collection)
+               {:content (.getBytes ^String json "UTF-8")
+                :content-type "application/json"})
+  true)
 
 (defn delete-blob [blob-id]
-  (let [base-url (.getBaseURL solr/*connection*)
-        base-client (.getHttpClient (solr/connect base-url))
-        delete-url (str base-url "/.system/update?commit=true")]
-    (string-post base-client delete-url
-                 (format "{\"delete\" : {\"id\" : \"%s\" }}" blob-id)
-                 "application/json")
-    true))
+  (req/request solr/*connection* :post "/.system/update"
+               {:params {:commit true}
+                :content (.getBytes (format "{\"delete\" : {\"id\" : \"%s\" }}" blob-id) "UTF-8")
+                :content-type "application/json"})
+  true)
 
 (defn add-runtime-lib
   [collection blob-name version]
-  (let [base-url (.getBaseURL solr/*connection*)
-        base-client (.getHttpClient (solr/connect base-url))
-        collection-url (str base-url (format "/%s/config" collection))]
-    (string-post base-client collection-url
-                 (format "{\"add-runtimelib\": {\"name\": \"%s\", \"version\": %s}}"
-                         blob-name version)
-                 "application/json")
-    true))
+  (config-post collection
+               (format "{\"add-runtimelib\": {\"name\": \"%s\", \"version\": %s}}"
+                       blob-name version)))
 
 (defn update-runtime-lib
   [collection blob-name version]
-  (let [base-url (.getBaseURL solr/*connection*)
-        base-client (.getHttpClient (solr/connect base-url))
-        collection-url (str base-url (format "/%s/config" collection))]
-    (string-post base-client collection-url
-                 (format "{\"update-runtimelib\": {\"name\": \"%s\", \"version\": %s}}"
-                         blob-name version)
-                 "application/json")
-    true))
+  (config-post collection
+               (format "{\"update-runtimelib\": {\"name\": \"%s\", \"version\": %s}}"
+                       blob-name version)))
 
 (defn delete-runtime-lib
   [collection blob-name]
-  (let [base-url (.getBaseURL solr/*connection*)
-        base-client (.getHttpClient (solr/connect base-url))
-        collection-url (str base-url (format "/%s/config" collection))]
-    (string-post base-client collection-url
-                 (format "{\"delete-runtimelib\": \"%s\"}" blob-name)
-                 "application/json")
-    true))
+  (config-post collection
+               (format "{\"delete-runtimelib\": \"%s\"}" blob-name)))
 

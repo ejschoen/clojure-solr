@@ -24,7 +24,8 @@
            (org.apache.solr.client.solrj SolrClient SolrRequest)
            (org.apache.solr.client.solrj.impl HttpJdkSolrClient HttpJdkSolrClient$Builder
                                               HttpSolrClientBase)
-           (org.apache.solr.client.solrj.request SolrQuery)))
+           (org.apache.solr.client.solrj.request SolrQuery)
+           (org.apache.solr.client.solrj.response InputStreamResponseParser)))
 
 (extend-protocol impl/SolrConnection
   HttpSolrClientBase
@@ -112,6 +113,7 @@
       (throw (ex-info "Unknown Solr client type" {:type (:type opts)}))))
   (new-query [_ q] (if q (SolrQuery. ^String q) (SolrQuery.)))
   (query? [_ x] (instance? SolrQuery x))
+  (stream-response-parser [_ writer-type] (InputStreamResponseParser. writer-type))
   (capabilities [_]
     ;; No :kerberos -- hadoop-auth and Krb5HttpClientBuilder are gone.
     ;; No :connection-manager -- the JDK client pools internally.
