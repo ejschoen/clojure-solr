@@ -433,34 +433,112 @@
     (reset! solr-zk-client-factory-fn (solr-zk-client-factory-builder)))
   (@solr-zk-client-factory-fn zkhost timeout))
 
+;;; ---------------------------------------------------------------------------
+;;; ZooKeeper operations
+;;;
+;;; SolrJ 9 and earlier end each SolrZkClient operation with a retryOnConnLoss
+;;; boolean.  SolrJ 10 dropped it -- the operations always retry -- so calling
+;;; the Solr 9 arity there fails at runtime with "No matching method getData
+;;; found taking 4 args for class org.apache.solr.common.cloud.SolrZkClient".
+;;; The arity has to come from the class actually on the classpath.
+;;;
+;;; Trimming the trailing boolean is not enough for makePath, whose surviving
+;;; two-argument overload means different things on either side:
+;;;
+;;;   SolrJ 9    makePath(path, failOnExists, retryOnConnLoss)
+;;;              makePath(path, retryOnConnLoss)        -- failOnExists is true
+;;;   SolrJ 10   makePath(path, failOnExists)
+;;;
+;;; so (.makePath client path false) creates a missing path on 10 but throws
+;;; NodeExistsException on any re-upload on 9.  Each operation below therefore
+;;; names the overload that carries the intended meaning on its own side rather
+;;; than dropping an argument from the other one.
+;;;
+;;; `client` is deliberately unhinted: a SolrZkClient hint would make the
+;;; compiler resolve both branches against whichever SolrJ the build sees, and
+;;; the branch for the other one would not compile.
+;;; ---------------------------------------------------------------------------
+
+(def ^:private zk-retry-arg?
+  "True when SolrZkClient takes the trailing retryOnConnLoss boolean, i.e. on
+   SolrJ 9 and earlier.  getData is the probe because its two arities cannot be
+   confused: 9 has only the four-argument form, 10 only the three-argument one."
+  (delay
+    (boolean (some (fn [^java.lang.reflect.Method m]
+                     (and (= "getData" (.getName m))
+                          (= 4 (alength (.getParameterTypes m)))))
+                   (.getMethods SolrZkClient)))))
+
+(defn- zk-make-path
+  "Create path and any missing parent, tolerating a path that already exists."
+  [client path]
+  (if @zk-retry-arg?
+    (.makePath client path false true)
+    (.makePath client path false)))
+
+(defn- zk-set-data
+  "Write bytes to path, whatever version is there."
+  [client path bytes]
+  (if @zk-retry-arg?
+    (.setData client path bytes true)
+    (.setData client path bytes)))
+
+(defn- zk-get-data
+  "The bytes at path, with no watcher and no stat."
+  [client path]
+  (if @zk-retry-arg?
+    (.getData client path nil nil true)
+    (.getData client path nil nil)))
+
+(defn- zk-delete
+  "Delete path at version; -1 deletes whatever version is there."
+  [client path version]
+  (if @zk-retry-arg?
+    (.delete client path version true)
+    (.delete client path version)))
+
+(defn- zk-get-children
+  "The child names at path, with no watcher."
+  [client path]
+  (if @zk-retry-arg?
+    (.getChildren client path nil true)
+    (.getChildren client path nil)))
+
+(defn- zk-exists?
+  "Whether path exists."
+  [client path]
+  (if @zk-retry-arg?
+    (.exists client path true)
+    (.exists client path)))
+
 (defn upload-to-zookeeper
   [zkhost path bytes & {:keys [timeout] :or {timeout 60}}]
   (with-open [client (solr-zk-client-factory  zkhost timeout)]
-    (.makePath client path false true)
-    (.setData client path bytes true)))
+    (zk-make-path client path)
+    (zk-set-data client path bytes)))
 
 (defn download-from-zookeeper
   [zkhost path & {:keys [timeout] :or {timeout 60}}]
   (with-open [client (solr-zk-client-factory  zkhost timeout)]
-    (.getData client path nil nil true)))
+    (zk-get-data client path)))
 
 (defn delete-from-zookeeper
   [zkhost path version & {:keys [timeout] :or {timeout 60}}]
   (with-open [client (solr-zk-client-factory  zkhost timeout)]
-    (.delete client path version true)))
+    (zk-delete client path version)))
 
 (defn list-zk-children
   "List the child znodes at a given path in ZooKeeper.
    Returns a java.util.List of child node names (not full paths)."
   [zkhost path & {:keys [timeout] :or {timeout 60}}]
   (with-open [client (solr-zk-client-factory zkhost timeout)]
-    (vec (.getChildren client path nil true))))
+    (vec (zk-get-children client path))))
 
 (defn zk-path-exists?
   "Check if a path exists in ZooKeeper."
   [zkhost path & {:keys [timeout] :or {timeout 60}}]
   (with-open [client (solr-zk-client-factory zkhost timeout)]
-    (.exists client path true)))
+    (zk-exists? client path)))
 
 (defn- copy-zk-tree
   "Recursively copy a ZK tree from source to target.
@@ -534,7 +612,7 @@
   (with-open [client (solr-zk-client-factory  zkhost timeout)]
     (if-let [parse-string (get-cheshire-parse-string)]
       (let [path (str org.apache.solr.common.cloud.ZkStateReader/COLLECTIONS_ZKNODE "/" collection)
-            data (.getData client path nil nil true)
+            data (zk-get-data client path)
             props (into {} (.getProperties (ZkNodeProps/load data)))
             props-json (org.apache.solr.common.util.Utils/toJSONString props)]
         (parse-string props-json))
@@ -545,10 +623,10 @@
   [zkhost configset collection & {:keys [timeout] :or {timeout 60}}]
   (with-open [client (solr-zk-client-factory  zkhost timeout)]
     (let [path (str org.apache.solr.common.cloud.ZkStateReader/COLLECTIONS_ZKNODE "/" collection)
-          data (.getData client path nil nil true)
+          data (zk-get-data client path)
           props (into {} (.getProperties (ZkNodeProps/load data)))
           props-updated (assoc props "configName" configset)]
-      (.setData client path (org.apache.solr.common.util.Utils/toJSON props-updated) true))))
+      (zk-set-data client path (org.apache.solr.common.util.Utils/toJSON props-updated)))))
 
 (defn get-system-info
   [&{:keys [as] :or {as (if json-enabled? :json :string)}}]
