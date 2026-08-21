@@ -812,7 +812,14 @@
                                                    )]
           (with-meta (list) {:query query :query-results-obj query-results}))
         (catch Exception e
-          (throw (ex-info (.getMessage e)
+          ;; SolrJ 10's JDK-client transport failures often carry no message at
+          ;; all -- ClosedChannelException, and the ConnectException wrapping it,
+          ;; both report null -- and an ex-info whose own message is nil breaks
+          ;; every caller that goes on to match on it.  A real message is passed
+          ;; through untouched; only the empty case is filled in.
+          (throw (ex-info (or (.getMessage e)
+                              (some-> (.getCause e) .getMessage)
+                              (.getName (class e)))
                           {:query query
                            :flags flags}
                           e)))))))

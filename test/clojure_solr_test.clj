@@ -825,3 +825,32 @@
       (is (true? (shared? *connection*)))
       (is (nil? (base-url *connection*)))
       (finally (.close ^SolrClient client)))))
+
+(deftest test-do-query-failure-always-carries-a-message
+  ;; SolrJ 10's JDK client reports an unreachable Solr as a ConnectException
+  ;; wrapping a ClosedChannelException, and neither carries a message.
+  ;; Rethrowing with (ex-info (.getMessage e) ...) then produced an ExceptionInfo
+  ;; whose own message was nil, which every caller matching on that message has
+  ;; to guard against: i2kweb's search-failure page threw NullPointerException
+  ;; out of re-find instead of rendering "the index is unavailable".
+  (letfn [(failure [^Throwable thrown]
+            (try
+              (binding [*connection* (proxy [SolrClient] []
+                                       (request [_ _] (throw thrown))
+                                       (close []))]
+                (do-query (clojure-solr.impl/new-query (clojure-solr.impl/impl) "*:*") {}))
+              nil
+              (catch clojure.lang.ExceptionInfo e e)))]
+    (testing "a real message is passed through unchanged"
+      (let [msg "org.apache.solr.search.SyntaxError: Cannot parse 'foo:'"]
+        (is (= msg (.getMessage ^Throwable (failure (Exception. msg)))))))
+    (testing "a missing message falls back to the cause's"
+      (let [thrown (doto (java.net.ConnectException.)
+                     (.initCause (java.io.IOException. "Connection refused")))]
+        (is (= "Connection refused" (.getMessage ^Throwable (failure thrown))))))
+    (testing "and to a type name when nothing in the chain has one"
+      (is (= "java.nio.channels.ClosedChannelException"
+             (.getMessage ^Throwable (failure (java.nio.channels.ClosedChannelException.))))))
+    (testing "the original failure is kept as the cause either way"
+      (let [thrown (java.nio.channels.ClosedChannelException.)]
+        (is (identical? thrown (.getCause ^Throwable (failure thrown))))))))
