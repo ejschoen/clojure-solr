@@ -334,6 +334,36 @@
         (CollectionAdminRequest/reloadCollection name)]
     (str (.processAndWait reload-request solr/*connection* timeout))))
   
+
+;;; ---------------------------------------------------------------------------
+;;; Collection options that Solr 9 removed
+;;;
+;;; maxShardsPerNode and autoAddReplicas belonged to the autoscaling framework
+;;; Solr 9 deleted, so CollectionAdminRequest$Create lost setMaxShardsPerNode and
+;;; setAutoAddReplicas.  Unlike the ZooKeeper arities there is nothing to fall
+;;; back on: the feature itself is gone.  A caller that asks for one is told so,
+;;; rather than left to decode "No matching method setAutoAddReplicas found
+;;; taking 2 args for class ...CollectionAdminRequest$Create".
+;;; ---------------------------------------------------------------------------
+
+(def ^:private create-request-setters
+  "The method names CollectionAdminRequest$Create publishes on this SolrJ."
+  (delay
+    (into #{}
+          (map (fn [^java.lang.reflect.Method m] (.getName m)))
+          (.getMethods CollectionAdminRequest$Create))))
+
+(defn- check-collection-option!
+  "Throw unless the running SolrJ still implements the option named by setter."
+  [option setter]
+  (when-not (contains? @create-request-setters setter)
+    (throw (ex-info (format (str "%s is not supported by the SolrJ on the classpath. "
+                                 "Solr 9 removed %s along with the autoscaling framework "
+                                 "the option belonged to, and there is no replacement; "
+                                 "create or modify the collection without it.")
+                            option setter)
+                    {:option option :setter setter}))))
+
 (defn modify-collection
   [name & {:keys [max-shards-per-node
                   replication-factor
@@ -342,6 +372,10 @@
                   timeout]
            :or {timeout 60}
            :as properties}]
+  (when max-shards-per-node
+    (check-collection-option! :max-shards-per-node "setMaxShardsPerNode"))
+  (when auto-add-replicas?
+    (check-collection-option! :auto-add-replicas? "setAutoAddReplicas"))
   (let [props (merge (if max-shards-per-node {"maxShardsPerNode" max-shards-per-node})
                      (if replication-factor {"replicationFactor" replication-factor})
                      (if auto-add-replicas? {"autoAddReplicas" auto-add-replicas?})
@@ -360,8 +394,11 @@
                                           collection-properties
                                           timeout]
                                    :or {timeout 60}}]
+  ;; contains?, not the set as a function: a set answers nil for nil, so
+  ;; (#{... nil} nil) is falsy and the check rejected exactly the default -- no
+  ;; router name at all -- that nil is in the set to permit.
   {:pre [name num-replicas num-shards
-         (#{:implicit :composite-id "compositeId" "implicit" nil} router-name)]}
+         (contains? #{:implicit :composite-id "compositeId" "implicit" nil} router-name)]}
   (let [create-request (if (not-empty config-name)
                          (CollectionAdminRequest/createCollection name config-name num-shards num-replicas)
                          (CollectionAdminRequest/createCollection name num-shards num-replicas))]
@@ -393,12 +430,14 @@
       (solr/trace (format "(.setTlogReplicas %d)" tlog-replicas))
       (.setTlogReplicas create-request tlog-replicas))
     (when (and max-shards-per-node (> max-shards-per-node 1))
+      (check-collection-option! :max-shards-per-node "setMaxShardsPerNode")
       (solr/trace (format "(.setMaxShardsPerNode %d)" max-shards-per-node))
       (.setMaxShardsPerNode create-request max-shards-per-node))
     (when (not-empty node-set)
       (solr/trace (format "(.setCreateNodeSet \"%s\")" node-set))
       (.setCreateNodeSet create-request node-set))
     (when auto-add-replicas?
+      (check-collection-option! :auto-add-replicas? "setAutoAddReplicas")
       (solr/trace (format "(.setAutoAddReplicas %s)" auto-add-replicas?))
       (.setAutoAddReplicas create-request auto-add-replicas?))
     (when collection-properties
