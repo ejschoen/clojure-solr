@@ -1613,10 +1613,11 @@
    one blindly would point a nested scope at the wrong collection -- and simply
    not closed on the way out.
 
-   Closing either is worse than a leak.  HttpJdkSolrClient.close shuts down the
-   executor the JDK client completes responses through, so a client closed while
-   another thread is mid-request leaves that thread parked on a future that will
-   never complete in either direction.
+   Closing either is still wrong, though no longer catastrophic: since
+   clojure-solr supplies the executor (solr10/request-executor), close cannot
+   shut it down, so a client closed mid-request no longer parks the other thread
+   forever -- it nulls the client's fields, and that thread gets a
+   NullPointerException instead.
 
    No client type is named here: both facts come from
    clojure-solr.impl/SolrConnection."
@@ -1651,10 +1652,11 @@
    caller's to close.  Buffering clients flush first; others drain to a no-op.
 
    A cached connection is drained but not closed.  Shutdown hooks run while
-   other threads are still working, and on Java 17 closing a client that another
-   thread has a request on parks that thread for good -- see the note above the
-   cache in clojure-solr.impl.  There is nothing to gain by racing the JVM's own
-   teardown for a socket it is about to drop anyway.  Use
+   other threads are still working, and closing a client another thread has a
+   request on breaks that request -- with an NPE now rather than the permanent
+   park it used to cause; see the note above the cache in clojure-solr.impl.
+   There is nothing to gain by racing the JVM's own teardown for a socket it is
+   about to drop anyway.  Use
    close-cached-connections! to close those deliberately."
   [^SolrClient conn]
   (.addShutdownHook (Runtime/getRuntime)

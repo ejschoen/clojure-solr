@@ -24,7 +24,8 @@
            (org.apache.solr.client.solrj SolrClient SolrRequest)
            (org.apache.solr.client.solrj.impl HttpJdkSolrClient HttpJdkSolrClient$Builder
                                               HttpSolrClientBase)
-           (org.apache.solr.common.util ExecutorUtil)
+           (java.util.concurrent SynchronousQueue)
+           (org.apache.solr.common.util ExecutorUtil ExecutorUtil$MDCAwareThreadPoolExecutor)
            (org.apache.solr.client.solrj.request SolrQuery)
            (org.apache.solr.client.solrj.response InputStreamResponseParser)))
 
@@ -129,7 +130,43 @@
    restores SolrJ's 60000."
   10000)
 
-(defonce ^:private request-thread-counter (java.util.concurrent.atomic.AtomicLong. 0))
+(defonce ^:private ^java.util.concurrent.atomic.AtomicLong request-thread-counter
+  (java.util.concurrent.atomic.AtomicLong. 0))
+
+(def request-executor-max-threads
+  "Ceiling on threads in request-executor.
+
+   Finite deliberately.  Exhaustion here surfaces as a RejectedExecutionException
+   on ONE request, which a caller sees and can report; an unbounded pool instead
+   meets the JVM's own limit and dies with OutOfMemoryError: unable to create
+   native thread, taking every other thread in the process with it.  A wedged
+   Solr must not be able to do that.
+
+   Each in-flight exchange occupies up to two threads (the body writer and the
+   response reader), so this allows a couple of hundred concurrent Solr
+   operations per process -- far above any caller here, whose concurrency is
+   bounded by its own worker and servlet pools."
+  512)
+
+(def request-executor-keepalive-seconds
+  "Idle seconds before a request-executor thread is reaped.
+
+   MUST EXCEED THE LARGEST REQUEST TIMEOUT ANY CONNECTION USES, and that is a
+   correctness requirement, not tuning.  PipedInputStream records the thread
+   that last read from it, and checkStateForReceive -- which awaitSpace calls
+   inside its wait loop -- throws IOException(\"Read end dead\") the moment that
+   thread is no longer alive.  Writer and reader both run on this pool, so if a
+   reader is reaped between two reads while the writer is parked on a full 1KB
+   pipe, the write fails.  SolrJ's lambda$preparePutOrPost$2 then CLOSES the
+   pipe and only logs \"Cannot write Content Stream\" -- it does not rethrow --
+   so the JDK client sees an orderly end of body and Solr indexes a TRUNCATED
+   document.  Silent corruption, from a pool tuning constant.
+
+   SolrJ's default pool never hit this because its four core threads never died.
+   600s is SolrJ's own getIdleTimeoutMillis default, i.e. the longest a request
+   can legitimately take through this library; default-socket-timeout is 120s.
+   A caller overriding :socket-timeout ABOVE this value reopens the window."
+  600)
 
 (defonce ^{:doc
   "The ExecutorService every JDK Solr client runs its exchanges on.
@@ -155,27 +192,43 @@
    https://lists.apache.org/thread/m5yz199r8bv7qo7251cc42wr7rz16q6b, whose
    reporter found the same threshold and the same remedy -- supply an executor.
 
-   Elastic and process-wide, which fixes the deadlock at its cause rather than
-   raising the threshold: newMDCAwareCachedThreadPool is a SynchronousQueue pool
-   with corePoolSize 0 and an unbounded maximum, so a task NEVER queues behind a
-   running one -- it takes an idle thread or gets a new one.  A stuck exchange
-   can then cost a thread (SOLR-17707 leaks one per send-side exception) without
-   costing throughput, and no client can starve another.  Idle threads reap
-   after 60s, so sharing costs nothing when quiet.
+   A SynchronousQueue hands every task straight to a thread: it takes an idle
+   one or gets a new one, and NEVER waits behind a running task.  That removes
+   the deadlock at its cause rather than raising its threshold, which is why the
+   queue matters more than the size.  Note ExecutorUtil's own
+   newMDCAwareCachedThreadPool(int,int,ThreadFactory) is NOT this shape -- it is
+   corePoolSize = maximumPoolSize with a bounded LinkedBlockingQueue, i.e. the
+   deadlocking shape again -- so the executor is built here rather than asked
+   for.  See request-executor-max-threads and
+   request-executor-keepalive-seconds; both bounds are load-bearing.
 
    Sharing one pool across clients is also why this is never shut down, and that
    is the second bug it closes.  HttpJdkSolrClient.close only shuts down an
    executor it created ITSELF (shutdownExecutor is false whenever one is
    supplied), so closing a client no longer tears down the executor another
-   thread's CompletableFuture is waiting to be completed through -- the hazard
-   described above the connection cache in clojure-solr.impl.  Threads are
-   daemons, so an unterminated pool cannot hold the JVM open."}
+   thread's CompletableFuture is waiting to be completed through.  A thread that
+   enters a client someone else closed now gets a NullPointerException from the
+   nulled field instead of parking forever -- a bad error, but a returning one.
+   Threads are daemons, so an unterminated pool cannot hold the JVM open."}
   request-executor
-  (ExecutorUtil/newMDCAwareCachedThreadPool
-   (reify java.util.concurrent.ThreadFactory
-     (newThread [_ r]
-       (doto (Thread. r (str "clojure-solr-http-" (.incrementAndGet request-thread-counter)))
-         (.setDaemon true))))))
+  (let [group (.getThreadGroup (Thread/currentThread))]
+    (ExecutorUtil$MDCAwareThreadPoolExecutor.
+     0
+     (int request-executor-max-threads)
+     (long request-executor-keepalive-seconds)
+     TimeUnit/SECONDS
+     (SynchronousQueue.)
+     ;; Pin the group and the priority rather than inheriting them from whichever
+     ;; application thread happened to force the pool to grow -- SolrNamedThread
+     ;; Factory does the same, and for the same reason: a thread created from a
+     ;; low-priority indexer would otherwise serve latency-critical traffic at
+     ;; that priority for its whole life, on a pool every caller shares.
+     (reify java.util.concurrent.ThreadFactory
+       (newThread [_ r]
+         (doto (Thread. group r (str "clojure-solr-http-"
+                                     (.incrementAndGet request-thread-counter)))
+           (.setDaemon true)
+           (.setPriority Thread/NORM_PRIORITY)))))))
 
 (defn- jdk-client
   [url {:keys [ssl-trust-store socket-timeout connection-timeout

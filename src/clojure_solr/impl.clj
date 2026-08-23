@@ -63,12 +63,23 @@
 ;;; the same target and options, and registers it here.
 ;;;
 ;;; Registration is what stops anything closing a client the cache will hand out
-;;; again.  That is not a tidiness rule.  HttpJdkSolrClient.close shuts down the
-;;; ExecutorService the JDK HttpClient delivers responses through, so closing a
-;;; client another thread is using leaves that thread's CompletableFuture
-;;; uncompleted in either direction -- no result, no exception, and no timeout,
-;;; since the timeout would have to be delivered through the same executor.  The
-;;; thread parks forever.
+;;; again.  That is not a tidiness rule -- though the reason CHANGED once
+;;; clojure-solr began supplying its own executor (see solr10/request-executor).
+;;;
+;;; It used to be that HttpJdkSolrClient.close shut down the ExecutorService the
+;;; JDK HttpClient delivers responses through, so closing a client another thread
+;;; was using left that thread's CompletableFuture uncompleted in either
+;;; direction -- no result, no exception, no timeout, parked forever.  close only
+;;; shuts down an executor it CREATED, and it no longer creates one, so that
+;;; particular wedge is gone.
+;;;
+;;; What remains is still worth avoiding: close nulls the client's httpClient and
+;;; executor fields regardless of ownership, so a thread that enters a closed
+;;; client gets a NullPointerException rather than a SolrServerException.  And on
+;;; Java 17, where java.net.http.HttpClient is not AutoCloseable, close now
+;;; releases NOTHING -- it nulls two fields and returns.  Anything counting on it
+;;; to free sockets or threads on that JVM is counting on nothing; the pool
+;;; self-reaps and the JDK client goes when GC takes it.
 ;;; ---------------------------------------------------------------------------
 
 (defonce ^:private client-cache (atom {}))

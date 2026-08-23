@@ -155,15 +155,21 @@ get it from ``connect`` and let the cache own it.
 
 **Do not close a connection another thread is using.**  This is worth stating
 separately because on Java 17 the failure is silent and permanent.
-``HttpJdkSolrClient.close`` shuts down the ``ExecutorService`` the JDK client
-delivers responses through -- and on Java 17 it does so without closing the JDK
-client itself, which only became ``AutoCloseable`` in Java 21.  A request in
-flight at that moment loses every bound it had, including its timeout, which
-would have to arrive through the executor that just died.  Measured: on Java 17
-that thread never returns, and a graceful ``shutdown()`` is enough to cause it;
-on Java 21 the same sequence fails in milliseconds with a
-``RejectedExecutionException``.  The applications run 17 and the test suite runs
-21, so no test here can reproduce it.
+Historically ``HttpJdkSolrClient.close`` shut down the ``ExecutorService`` the
+JDK client delivers responses through -- and on Java 17 it did so without
+closing the JDK client itself, which only became ``AutoCloseable`` in Java 21.
+A request in flight at that moment lost every bound it had, including its
+timeout, which would have to arrive through the executor that just died.
+Measured: on Java 17 that thread never returned, and a graceful ``shutdown()``
+was enough to cause it.
+
+**That specific wedge is gone.**  clojure-solr now supplies the executor, and
+``close`` only shuts down one it created itself, so a close can no longer strand
+another thread's request.  Closing a shared client is still wrong -- ``close``
+nulls the client's fields whoever owns them, so the other thread gets a
+``NullPointerException`` -- but it returns rather than parking.  Note the
+corollary on Java 17: ``close`` now releases nothing at all, so do not count on
+``close-cached-connections!`` to free sockets or threads there.
 
 Moving the applications to Java 21 needs no code change -- ``solr-solrj`` 10 is
 compiled to class file 61 -- and it turns that silent wedge into a fast failure.
