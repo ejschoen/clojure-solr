@@ -54,6 +54,36 @@
 (defn get-default-connection-manager []
   @default-connection-manager)
 
+(defonce ^:private default-http-version (atom nil))
+
+(defn set-default-http-version!
+  "Choose the HTTP protocol new connections speak: :http1, :http2, or nil for
+   whatever the SolrJ on the classpath does by default (HTTP/2 on Solr 10).
+
+   Call it once at startup, before anything connects, in place of SolrJ's
+   solr.http1 system property.  The property is read when a client is built, so
+   setting it late leaves an already-cached client on HTTP/2 for the life of the
+   process; this setting is folded into what distinguishes one cached connection
+   from another, so a change takes effect on the next connect rather than being
+   silently too late.  A :http1? passed to connect still wins for that call.
+
+   Ignored on Solr 9, whose Apache client speaks HTTP/1.1 regardless.
+
+   HTTP/1.1 is worth choosing on JDKs at or after the backport of JDK-8335181
+   (17.0.17, 21.0.8, 24) and before the fix for JDK-8385131 (28): in that window
+   an HTTP/2 connection that receives GOAWAY with no active streams is marked
+   final and never closed."
+  [version]
+  (when-not (contains? #{:http1 :http2 nil} version)
+    (throw (ex-info "HTTP version must be :http1, :http2 or nil"
+                    {:version version})))
+  (reset! default-http-version version))
+
+(defn get-default-http-version
+  "The protocol new connections will speak; see set-default-http-version!."
+  []
+  @default-http-version)
+
 (def default-method (atom :post))
 
 (def http-methods {:get SolrRequest$METHOD/GET, :GET SolrRequest$METHOD/GET
@@ -426,11 +456,26 @@
   (impl/drain conn))
 
 (defn shared?
-  "True if this connection is a process-lifetime resource; see
-   clojure-solr.impl/shared?.  Replaces testing a connection's class to decide
-   whether it is safe to close."
+  "True if this connection is a process-lifetime resource -- registered with
+   mark-shared!, or held by the connection cache -- and so is not this scope's
+   to close.  See clojure-solr.impl/shared?.  Replaces testing a connection's
+   class to decide whether it is safe to close."
   [conn]
   (impl/shared? conn))
+
+(defn cache-owned?
+  "True if this connection is one the connection cache is holding and connect
+   will hand out again; see clojure-solr.impl/cache-owned?.  A caller writing
+   its own with-connection should consult this, or shared?, before closing."
+  [conn]
+  (impl/cache-owned? conn))
+
+(defn close-cached-connections!
+  "Drain, close and forget every connection the cache holds; returns how many
+   were closed.  See clojure-solr.impl/close-cached-clients! -- including the
+   warning that this is not safe against concurrent use of those connections."
+  []
+  (impl/close-cached-clients!))
 
 (defn base-url
   "The collection URL this connection talks to; see clojure-solr.impl/base-url.
@@ -477,6 +522,16 @@
                             "SSLConnectionSocketFactory, which SolrJ 10 does not use. "
                             "Pass :ssl-trust-store to connect instead."))))
 
+(defn- cacheable-client?
+  "Whether connect may cache the client these options describe.  :http by
+   default, because that is the client whose pooling depends on being reused;
+   never a buffering or embedded client, whose lifecycle belongs to whoever
+   built it.  :cache-client? overrides in either direction."
+  [opts]
+  (if (contains? opts :cache-client?)
+    (boolean (:cache-client? opts))
+    (= :http (:type opts :http))))
+
 (defn connect
   "Create a connection to a Solr URI.
 
@@ -496,18 +551,42 @@
 
      :type                      :http (default), :concurrent-update, or any type
                                 registered with make-solr-client
+     :cache-client?             see Reuse, below
    for :http
      :ssl-trust-store           File pointing at a trust store, or :self-signed
      :ssl-trust-password        Optional password for the trust store
      :allow-compression         true/false                     (Solr 9)
      :kerberos-delegation-token string                         (Solr 9)
-     :socket-timeout            int, milliseconds
-     :connection-timeout        int, milliseconds
+     :socket-timeout            int, milliseconds.  On Solr 10 this bounds a
+                                single request and defaults to 120000; see
+                                clojure-solr.impl.solr10/default-socket-timeout.
+     :connection-timeout        int, milliseconds.  On Solr 10 this bounds
+                                connection establishment and defaults to 10000.
+     :http1?                    true to speak HTTP/1.1 rather than HTTP/2
+                                (Solr 10; ignored on Solr 9, which has no HTTP/2
+                                client).  Prefer this to SolrJ's solr.http1
+                                system property: the property is read when a
+                                client is built, so it cannot affect a client
+                                already cached, whereas this option is part of
+                                what distinguishes one cached client from
+                                another.
+
    for :concurrent-update
      :queue-size                integer buffer capacity
      :thread-count              integer background thread count
      :socket-timeout            int, milliseconds
      :connection-timeout        int, milliseconds
+
+   Reuse.  A :http connection is cached and connect hands the same client back
+   for the same URL, options and credentials -- SolrJ 10 pools per client
+   instance, so a client built per operation pools nothing.  Two connects that
+   differ in any of those get different clients.  A cached client belongs to the
+   process, not to a scope: with-connection will not close it, shared? and
+   cache-owned? both answer true for it, and close-cached-connections! is the
+   only thing that closes it.  Pass :cache-client? false to opt out and get a
+   fresh client that the caller then owns.  Other client types are not cached --
+   a buffering client and an embedded server have lifecycles of their own -- but
+   :cache-client? true will cache one anyway.
 
    When Kerberos has been configured with set-kerberos-credentials, connections
    negotiate with SPNEGO.  Per-host credentials set with set-credentials take
@@ -519,11 +598,20 @@
         opts (merge solr-client-options
                     {:credential credential
                      :kerberos? use-kerberos
-                     :conn-manager (or conn-manager @default-connection-manager)})]
-    (make-solr-client (:clean-url (get-url-details url))
-                      nil
-                      solr-major-version
-                      opts)))
+                     :conn-manager (or conn-manager @default-connection-manager)})
+        ;; Normalised rather than merged: :http1? false and :http1? absent build
+        ;; the same client, so they must not be two cache entries.
+        http1? (if (contains? solr-client-options :http1?)
+                 (boolean (:http1? solr-client-options))
+                 (= :http1 @default-http-version))
+        opts (if http1? (assoc opts :http1? true) (dissoc opts :http1?))
+        clean-url (:clean-url (get-url-details url))
+        build #(make-solr-client clean-url nil solr-major-version opts)]
+    (if (cacheable-client? opts)
+      ;; Everything that decides how the client is built is in the key, so two
+      ;; connects share a client exactly when they would have built the same one.
+      (impl/cached-client [clean-url solr-major-version opts] build)
+      (build))))
 
 
 (defn- make-document [boost-map doc]
@@ -1512,15 +1600,29 @@
     (.query ^SolrClient *connection* params)))
 
 (defmacro with-connection
-  "Bind *connection* to conn for the extent of body, then drain and close it.
+  "Bind *connection* to conn for the extent of body, then drain it, and close it
+   if this scope is what it belongs to.
 
-   If a shared connection is already bound -- one whose lifetime belongs to the
-   process rather than to this scope, such as an embedded Solr server -- it is
-   reused and conn is never evaluated.  A connection declares itself shared by
-   extending clojure-solr.impl/SolrConnection, so no client type is named here."
+   Two connections are not this scope's to close.  One is registered with
+   mark-shared! -- an embedded Solr server, whose CoreContainer is derived once
+   per process; if such a connection is already bound, it is reused and conn is
+   never evaluated at all, since evaluating it would build a second one.  The
+   other is held by the connection cache, which connect fills for :http clients
+   so that SolrJ 10's per-instance pooling has an instance to pool on; that one
+   is evaluated and bound as usual -- it is a map lookup, and reusing an outer
+   one blindly would point a nested scope at the wrong collection -- and simply
+   not closed on the way out.
+
+   Closing either is worse than a leak.  HttpJdkSolrClient.close shuts down the
+   executor the JDK client completes responses through, so a client closed while
+   another thread is mid-request leaves that thread parked on a future that will
+   never complete in either direction.
+
+   No client type is named here: both facts come from
+   clojure-solr.impl/SolrConnection."
   [conn & body]
   `(let [old# (when (bound? #'*connection*) *connection*)]
-     (if (and old# (impl/shared? old#))
+     (if (and old# (impl/reuse-bound? old#))
        (do ~@body)
        (let [c# ~conn]
          (binding [*connection* c#]
@@ -1528,7 +1630,8 @@
              (do ~@body)
              (finally
                (impl/drain c#)
-               (.close ^SolrClient c#))))))))
+               (when-not (impl/cache-owned? c#)
+                 (.close ^SolrClient c#)))))))))
 
 #_(defmacro with-connection [conn & body]
   `(binding [*connection* ~conn]
@@ -1544,12 +1647,20 @@
      ~@body))
 
 (defn register-shutdown-hook!
-  "Register a JVM shutdown hook that drains and closes conn.  Buffering clients
-   flush first; others drain to a no-op."
+  "Register a JVM shutdown hook that drains conn, and closes it if it is the
+   caller's to close.  Buffering clients flush first; others drain to a no-op.
+
+   A cached connection is drained but not closed.  Shutdown hooks run while
+   other threads are still working, and on Java 17 closing a client that another
+   thread has a request on parks that thread for good -- see the note above the
+   cache in clojure-solr.impl.  There is nothing to gain by racing the JVM's own
+   teardown for a socket it is about to drop anyway.  Use
+   close-cached-connections! to close those deliberately."
   [^SolrClient conn]
   (.addShutdownHook (Runtime/getRuntime)
     (Thread.
       (fn []
         (impl/drain conn)
-        (.close conn)))))
+        (when-not (impl/cache-owned? conn)
+          (.close conn))))))
 

@@ -818,13 +818,245 @@
       (is (= url (base-url client))
           "base-url must reach the implementation's extension, not the default")
       (is (= (base-url client) (clojure-solr.impl/base-url client)))
-      (is (false? (shared? client)))
+      ;; connect caches :http clients, and a cached client is the process's
+      ;; rather than this scope's, so shared? answers true for it.
+      (is (true? (shared? client)))
+      (is (true? (cache-owned? client)))
       (is (identical? client (unwrap client)))
       (is (nil? (drain client)))
       ;; The embedded server is registered as shared, and reports no base URL.
       (is (true? (shared? *connection*)))
       (is (nil? (base-url *connection*)))
-      (finally (.close ^SolrClient client)))))
+      ;; ...but only mark-shared! earns blind reuse by a nested scope.
+      (is (true? (clojure-solr.impl/reuse-bound? *connection*)))
+      (is (false? (clojure-solr.impl/reuse-bound? client)))
+      (finally (close-cached-connections!)))))
+
+;;; ---------------------------------------------------------------------------
+;;; The connection cache
+;;;
+;;; The gate the Solr 10 migration named -- "connect twice through the real
+;;; client" -- was read as twice through ONE client, which is the nesting case.
+;;; What wedged a deployed process was twice through TWO clients: a call site
+;;; that connected per operation, so SolrJ 10's per-instance pooling had nothing
+;;; to pool on, and a scope that closed a client another thread was using.
+;;; ---------------------------------------------------------------------------
+
+(deftest test-connect-reuses-one-client-per-target
+  (let [url  "http://localhost:18983/solr/cache-a"
+        url2 "http://localhost:18983/solr/cache-b"]
+    (try
+      (is (identical? (connect url) (connect url))
+          "two connects for the same URL and options must be one client")
+      (is (not (identical? (connect url) (connect url2)))
+          "different collections must not share a client")
+      (is (not (identical? (connect url) (connect url nil {:socket-timeout 4321})))
+          "options that change how the client is built must not share a client")
+      (is (not (identical? (connect url nil {:socket-timeout 4321})
+                           (connect url nil {:socket-timeout 8765})))
+          "and neither must different values of the same option")
+      (is (identical? (connect url nil {:socket-timeout 4321})
+                      (connect url nil {:socket-timeout 4321}))
+          "while the same options must")
+      (is (not (identical? (connect url) (connect url nil {:cache-client? false})))
+          ":cache-client? false must hand back something the caller owns")
+      (is (false? (cache-owned? (connect url nil {:cache-client? false}))))
+      (finally (close-cached-connections!)))))
+
+;; A client type the test owns, so that closing can be counted without a server
+;; and without depending on how a particular SolrJ reports a closed client.
+;; :cache-client? true is what puts it in the cache; only :http goes there by
+;; default.
+(defmethod make-solr-client ::counting
+  [_ _ _ solr-client-options]
+  (let [closed (:closed solr-client-options)]
+    (proxy [SolrClient] []
+      (request [_ _] nil)
+      (close [] (swap! closed inc)))))
+
+(deftest test-with-connection-closes-only-what-it-owns
+  (testing "a client the scope built is still closed on the way out"
+    (let [closed (atom 0)
+          client (proxy [SolrClient] []
+                   (request [_ _] nil)
+                   (close [] (swap! closed inc)))]
+      ;; *connection* is bound to the embedded server by the fixture, and that
+      ;; one is reused blindly; unbind it so with-connection takes its ordinary
+      ;; path.
+      (binding [*connection* nil]
+        (with-connection client
+          (is (identical? client *connection*))))
+      (is (= 1 @closed) "a connection this scope created must be closed")))
+
+  (testing "a client the cache owns survives the scope, and later scopes"
+    (let [closed (atom 0)
+          opts {:type ::counting :cache-client? true :closed closed}
+          url "http://localhost:18983/solr/counted"
+          client (connect url nil opts)]
+      (try
+        (is (true? (cache-owned? client)))
+        (is (true? (shared? client)))
+        (binding [*connection* nil]
+          (with-connection (connect url nil opts)
+            (is (identical? client *connection*))))
+        (is (zero? @closed)
+            "with-connection must not close a client the cache will hand out again")
+        (binding [*connection* nil]
+          (with-connection (connect url nil opts)
+            (is (identical? client *connection*)
+                "and the second scope must still get a usable client")))
+        (is (zero? @closed))
+        (finally
+          (is (pos? (close-cached-connections!)))
+          (is (= 1 @closed) "close-cached-connections! is what closes it")
+          (is (false? (cache-owned? client))
+              "and the cache forgets it")))))
+
+  (testing "concurrent connects for one target build one client"
+    (let [url "http://localhost:18983/solr/racing"]
+      (try
+        (let [clients (->> (repeatedly 16 #(future (connect url)))
+                           (doall)
+                           (map deref)
+                           (set))]
+          (is (= 1 (count clients))
+              "every thread must get the one client, not one each"))
+        (finally (close-cached-connections!))))))
+
+;; A client whose request blocks until released, so a scope exit can be made to
+;; land while another thread is provably mid-request.
+(defmethod make-solr-client ::blocking
+  [_ _ _ {:keys [closed in-flight release]}]
+  (proxy [SolrClient] []
+    (request [_ _]
+      (.countDown ^java.util.concurrent.CountDownLatch in-flight)
+      (.await ^java.util.concurrent.CountDownLatch release)
+      ;; SolrClient.request is declared to return a NamedList, so the proxy
+      ;; casts whatever comes back; a keyword marker would fail on the cast.
+      (doto (org.apache.solr.common.util.NamedList.) (.add "completed" "yes")))
+    (close [] (swap! closed inc))))
+
+(deftest test-scope-exit-does-not-close-a-client-in-use
+  ;; The shape that wedged production: several workers using one client at once,
+  ;; each wrapping its own with-connection around one operation.  The first scope
+  ;; to exit runs the finally.  If that closes the client, the others are left on
+  ;; a future that will never complete in either direction -- on Java 17
+  ;; HttpJdkSolrClient.close shuts down the executor its responses arrive
+  ;; through, and the timeout would have to arrive the same way.  Measured
+  ;; end-to-end on Java 17, that shape parks 8 of 8 workers permanently when the
+  ;; client is shared by hand, and 0 of 8 when it comes from connect.
+  ;;
+  ;; Java 21 cannot show the park -- close there fails fast instead -- and the
+  ;; suite runs 21 because solr-core 10 requires it.  So this asserts the rule
+  ;; rather than the symptom: the scope must not close, and the in-flight request
+  ;; must still finish.
+  (let [closed    (atom 0)
+        in-flight (java.util.concurrent.CountDownLatch. 1)
+        release   (java.util.concurrent.CountDownLatch. 1)
+        opts      {:type ::blocking :cache-client? true :closed closed
+                   :in-flight in-flight :release release}
+        url       "http://localhost:18983/solr/in-use"
+        worker    (future
+                    (binding [*connection* nil]
+                      (with-connection (connect url nil opts)
+                        (.request ^SolrClient *connection* nil nil))))]
+    (try
+      (is (.await in-flight 10 java.util.concurrent.TimeUnit/SECONDS)
+          "the worker must reach the point of being mid-request")
+      ;; A second scope opens on the same client and exits immediately.
+      (binding [*connection* nil]
+        (with-connection (connect url nil opts) :nothing))
+      (is (zero? @closed)
+          "a scope exiting must not close a client another thread is using")
+      (.countDown release)
+      (let [result (deref worker 10000 :timed-out)]
+        (is (not= :timed-out result) "and the in-flight request must still complete")
+        (is (= "yes" (.get ^org.apache.solr.common.util.NamedList result "completed"))))
+      (finally
+        (.countDown release)
+        (close-cached-connections!)))
+    (is (= 1 @closed) "close-cached-connections! is what finally closes it")))
+
+(deftest test-cache-registration-cannot-leak
+  ;; connect raced against close-cached-connections!.  The invariant is not that
+  ;; every client handed out is still cached -- a close may land between the two
+  ;; -- but that nothing is left registered as cache-owned while unreachable from
+  ;; the cache.  Such a client is closed by nobody: with-connection refuses
+  ;; because it reports itself shared, and close-cached-connections! cannot see
+  ;; it.  A delay-based cache that registered the client from inside the delay
+  ;; leaked ~200 of them per run of this shape, because a close could drop the
+  ;; not-yet-realized entry while the delay went on to register it anyway.
+  (let [closed (atom 0)
+        opts   {:type ::counting :cache-client? true :closed closed}
+        url    (fn [k] (str "http://localhost:18983/solr/leak-" k))
+        closer (future (dotimes [_ 80]
+                         (Thread/sleep 2)
+                         (close-cached-connections!)))
+        churn  (doall (for [i (range 8)]
+                        (future (dotimes [n 250]
+                                  (connect (url (mod (+ i n) 32)) nil opts)))))]
+    (run! deref churn)
+    @closer
+    (close-cached-connections!)
+    (is (= (clojure-solr.impl/cached-client-count)
+           (clojure-solr.impl/cache-owned-count))
+        "a registered client must still be reachable from the cache")
+    (is (zero? (clojure-solr.impl/cached-client-count)))
+    (is (pos? @closed) "the race must actually have built and closed clients")))
+
+(deftest test-jdk-client-carries-a-default-request-timeout
+  ;; Only the JDK client.  The Apache client on SolrJ 9 genuinely has no default
+  ;; socket timeout, but changing that is a separate decision about consumers
+  ;; still on 6.0.0/SolrJ 8.11.4.
+  (when-not (clojure-solr.impl/supports? :connection-manager)
+    (let [default @(ns-resolve 'clojure-solr.impl.solr10 'default-socket-timeout)
+          field   (doto (.getDeclaredField
+                         (Class/forName "org.apache.solr.client.solrj.impl.HttpSolrClientBase")
+                         "requestTimeoutMillis")
+                    (.setAccessible true))
+          timeout (fn [client] (.getLong field (unwrap client)))]
+      (try
+        (is (= (long default) (timeout (connect "http://localhost:18983/solr/timeouts")))
+            "an unconfigured connection must still be bounded")
+        (is (= 45000 (timeout (connect "http://localhost:18983/solr/timeouts"
+                                       nil {:socket-timeout 45000})))
+            ":socket-timeout must still override it")
+        (finally (close-cached-connections!))))))
+
+(deftest test-http1-is-selectable-per-connection
+  ;; Forcing HTTP/1.1 is how a caller sidesteps the JDK's HTTP/2 GOAWAY handling.
+  ;; SolrJ offers only the solr.http1 system property, read in the builder's
+  ;; constructor -- so it cannot reach a client that connect has already cached.
+  ;; :http1? is part of the cache key, so it always applies to the client it
+  ;; describes.
+  (when-not (clojure-solr.impl/supports? :connection-manager)
+    (let [forced (fn [conn]
+                   (let [raw (unwrap conn)
+                         f (doto (.getDeclaredField (class raw) "forceHttp11")
+                             (.setAccessible true))]
+                     (.getBoolean f raw)))
+          url "http://localhost:18983/solr/http1"]
+      (try
+        (is (false? (forced (connect url)))
+            "HTTP/2 stays the default")
+        (is (true? (forced (connect url nil {:http1? true})))
+            ":http1? must reach the built client")
+        (is (not (identical? (connect url) (connect url nil {:http1? true})))
+            "and must not share a cached client with the default")
+
+        (testing "and can be set once for the process"
+          (set-default-http-version! :http1)
+          (is (true? (forced (connect url))) "the default must reach new connections")
+          (is (false? (forced (connect url nil {:http1? false})))
+              "an explicit option still wins")
+          (set-default-http-version! :http2)
+          (is (false? (forced (connect url))))
+          (is (identical? (connect url) (connect url nil {:http1? false}))
+              ":http2 and an explicit false must not build two clients")
+          (is (thrown? clojure.lang.ExceptionInfo (set-default-http-version! :http3))))
+        (finally
+          (set-default-http-version! nil)
+          (close-cached-connections!))))))
 
 (deftest test-do-query-failure-always-carries-a-message
   ;; SolrJ 10's JDK client reports an unreachable Solr as a ConnectException

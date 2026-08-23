@@ -30,13 +30,16 @@
 (extend-protocol impl/SolrConnection
   ConcurrentUpdateSolrClient
   (drain [c] (.blockUntilFinished c))
-  (shared? [_] false)
+  ;; Never cached -- a buffering client has an explicit flush-and-close
+  ;; lifecycle -- so this is always false.  Asking the cache rather than
+  ;; answering false keeps one rule in one place.
+  (shared? [c] (impl/cache-owned? c))
   (base-url [c] (.getBaseURL c))
   (unwrap [c] c)
 
   HttpSolrClient
   (drain [_] nil)
-  (shared? [_] false)
+  (shared? [c] (impl/cache-owned? c))
   (base-url [c] (.getBaseURL c))
   (unwrap [c] c))
 

@@ -30,7 +30,7 @@
 (extend-protocol impl/SolrConnection
   HttpSolrClientBase
   (drain [_] nil)
-  (shared? [_] false)
+  (shared? [c] (impl/cache-owned? c))
   (base-url [c] (.getBaseURL c))
   (unwrap [c] c))
 
@@ -101,18 +101,55 @@
                  "The JDK client pools connections and reclaims idle ones on its own."))
       (select-keys conn-manager [:max-connections-per-host]))))
 
+(def default-socket-timeout
+  "Milliseconds a single request may take before the JDK client abandons it,
+   when a connection does not ask for something else with :socket-timeout.
+
+   Applied always, rather than only when a caller supplies a value.  SolrJ does
+   have a default of its own -- HttpSolrClientBuilderBase.getIdleTimeoutMillis
+   answers 600000 when unset, and getRequestTimeoutMillis falls back to it, so
+   \"no timeout configured\" has never meant \"wait forever\" here -- but ten
+   minutes of an unresponsive Solr is indistinguishable from a wedge to anything
+   watching, and eight workers reaching that limit in turn is a very long
+   outage.  Two minutes is long enough for a large commit and short enough that
+   a stall surfaces as a failure someone can act on.
+
+   Override per connection with :socket-timeout.  There is no way to ask for no
+   timeout at all: SolrJ treats a non-positive value as unset and substitutes
+   its own 600000."
+  120000)
+
+(def default-connection-timeout
+  "Milliseconds the JDK client will spend establishing a TCP connection, when a
+   connection does not ask for something else with :connection-timeout.
+   SolrJ's own default is 60000, which is far longer than a reachable Solr ever
+   needs; a Solr that has not accepted a connection in ten seconds is down.
+   Override per connection with :connection-timeout; a non-positive value
+   restores SolrJ's 60000."
+  10000)
+
 (defn- jdk-client
   [url {:keys [ssl-trust-store socket-timeout connection-timeout
-               max-connections-per-host default-collection] :as opts}]
-  (let [b (HttpJdkSolrClient$Builder. url)]
+               max-connections-per-host default-collection http1?] :as opts}]
+  (let [b (HttpJdkSolrClient$Builder. url)
+        socket-timeout (or socket-timeout default-socket-timeout)
+        connection-timeout (or connection-timeout default-connection-timeout)]
     (when default-collection (.withDefaultCollection b default-collection))
     (when ssl-trust-store
       (when-let [ctx (build-ssl-context opts)] (.withSSLContext b ctx)))
-    (when connection-timeout (.withConnectionTimeout b (long connection-timeout) TimeUnit/MILLISECONDS))
+    (.withConnectionTimeout b (long connection-timeout) TimeUnit/MILLISECONDS)
     ;; The Apache socket timeout is closest to an idle timeout here; SolrJ 10's
     ;; request timeout covers the whole exchange, which is not the same thing.
-    (when socket-timeout (.withIdleTimeout b (long socket-timeout) TimeUnit/MILLISECONDS))
+    ;; The two meet anyway: with no explicit request timeout, SolrJ uses the idle
+    ;; timeout as the per-request timeout it hands to HttpRequest.Builder.
+    (.withIdleTimeout b (long socket-timeout) TimeUnit/MILLISECONDS)
     (when max-connections-per-host (.withMaxConnectionsPerHost b (int max-connections-per-host)))
+    ;; Per connection, rather than SolrJ's solr.http1 system property.  The
+    ;; property is read in the builder's constructor, so it only affects clients
+    ;; built after it is set -- and since connect caches, a client built before
+    ;; that keeps speaking HTTP/2 for the life of the process.  This option is
+    ;; part of the cache key, so it cannot be applied too late to matter.
+    (when http1? (.useHttp1_1 b true))
     (.build b)))
 
 (defn- authenticating-client
@@ -134,7 +171,11 @@
       (.request delegate ^SolrRequest req ^String collection))
     (close [] (.close delegate))
     (drain [] (impl/drain delegate))
-    (shared_QMARK_ [] (impl/shared? delegate))
+    ;; The wrapper, not the delegate, is what connect caches and hands back, so
+    ;; ownership has to be asked of this object.  The delegate still answers for
+    ;; everything else it might be -- an embedded server registered with
+    ;; mark-shared!, say.
+    (shared_QMARK_ [] (or (impl/cache-owned? this) (impl/shared? delegate)))
     (base_url [] (impl/base-url delegate))
     (unwrap [] delegate)))
 

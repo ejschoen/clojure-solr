@@ -105,6 +105,107 @@ last two are reported once and ignored.  ``set-default-connection-manager`` and
 ``build-connection-socket-factory`` remain for SolrJ 9; the latter raises on
 SolrJ 10, where there is no Apache socket factory to build.
 
+**Connections are cached, and are no longer yours to close.**  ``connect``
+returns the same client for the same URL, options and credentials, and
+``with-connection`` no longer closes it::
+
+    ;; this is one client and one connection pool, not one per document
+    (doseq [doc docs]
+      (with-connection (connect url)
+        (add-document! doc)))
+
+SolrJ 10 pools connections per client *instance*, so a client built per operation
+pools nothing: it is a new TCP connection and a new HTTP/2 preface every time.
+Measured on Java 17 against a local HTTP endpoint, 3200 saves through
+connect-per-operation opened 3206 TCP connections and left the process holding
+1458 extra epoll descriptors and 3272 extra threads; the same 3200 through the
+cache used 10 connections, one epoll descriptor and 14 threads, and ran 27 times
+faster with a p99 of 3.8 ms rather than 738 ms.
+
+What changes for callers:
+
+- ``with-connection`` closes a connection it created and leaves a cached one
+  open.  ``shared?`` and ``cache-owned?`` both answer true for a cached client.
+  Code that closes connections itself must consult one of them first.
+- ``close-cached-connections!`` is the only thing that closes cached clients.
+  There is no automatic eviction: the JDK client discards a broken connection on
+  its own, and evicting on failure would restore the per-operation churn.  One
+  client is held per distinct target, costing about 4 file descriptors and 6
+  threads each (measured at 25 and at 100 targets, scaling linearly), so a
+  process that talks to a great many collections should size for that.
+- ``register-shutdown-hook!`` drains a cached connection but does not close it.
+- ``:cache-client? false`` opts out and hands back a client the caller owns.
+  ``:cache-client? true`` caches a type that would not be cached by default.
+- Only ``:http`` connections are cached.  Buffering clients and embedded servers
+  have lifecycles of their own.
+- A nested ``with-connection`` still evaluates its own ``connect``.  Only a
+  connection registered with ``mark-shared!`` is reused blindly; doing that for
+  cached clients would point a nested scope at the wrong collection.
+
+**Do not hand your own client to** ``with-connection`` **from several threads.**
+The cache makes ``(with-connection (connect url) ...)`` safe, because no scope
+may close a cached client.  It does nothing for a client you built yourself and
+share: that one is not cache-owned, so the first scope to exit closes it while
+the others are still mid-request.  Measured end-to-end on Java 17, eight workers
+sharing one hand-built client and one more scope opening and closing around it:
+**eight of eight workers parked permanently**, against zero of eight when the
+same workers each called ``connect``.  On Java 21 neither parks.  If you hold
+your own client, either use ``with-opened-connection``, which never closes, or
+get it from ``connect`` and let the cache own it.
+
+**Do not close a connection another thread is using.**  This is worth stating
+separately because on Java 17 the failure is silent and permanent.
+``HttpJdkSolrClient.close`` shuts down the ``ExecutorService`` the JDK client
+delivers responses through -- and on Java 17 it does so without closing the JDK
+client itself, which only became ``AutoCloseable`` in Java 21.  A request in
+flight at that moment loses every bound it had, including its timeout, which
+would have to arrive through the executor that just died.  Measured: on Java 17
+that thread never returns, and a graceful ``shutdown()`` is enough to cause it;
+on Java 21 the same sequence fails in milliseconds with a
+``RejectedExecutionException``.  The applications run 17 and the test suite runs
+21, so no test here can reproduce it.
+
+Moving the applications to Java 21 needs no code change -- ``solr-solrj`` 10 is
+compiled to class file 61 -- and it turns that silent wedge into a fast failure.
+One behaviour does change: on Java 21 ``close`` really does close the JDK client,
+and ``HttpClient.close`` waits for outstanding requests.  Measured with a request
+in flight, closing took 3018 ms with a 4 s request timeout and was still blocked
+at a 15 s cap with no timeout at all.  So on Java 21 the wait moves from the
+requesting thread to the closing one, and the default ``:socket-timeout`` above
+is what bounds it.  With the cache in place closes are rare, but
+``close-cached-connections!`` is the call to think about.
+
+**Forcing HTTP/1.1.**  ``:http1? true`` makes a Solr 10 connection speak HTTP/1.1
+instead of HTTP/2::
+
+    (connect url nil {:http1? true})
+
+For a whole process, set it once at startup instead of at every call site::
+
+    (clojure-solr/set-default-http-version! :http1)   ; or :http2, or nil
+
+SolrJ offers this only as the ``solr.http1`` system property, which it reads in
+the client builder's constructor.  That is read-on-build, so setting the property
+after a client exists has no effect on it -- and because ``connect`` caches, a
+client built before the property was set keeps speaking HTTP/2 for the life of
+the process.  Both ``:http1?`` and ``set-default-http-version!`` are folded into what
+distinguishes one cached client from another, so a change takes effect on the
+next ``connect`` rather than being silently too late.  Ignored on Solr 9, whose
+Apache client speaks HTTP/1.1 regardless.
+
+Worth reaching for on JDKs between the backport of ``JDK-8335181`` (17.0.17,
+21.0.8, 24) and the fix for ``JDK-8385131`` (28): in that window an HTTP/2
+connection that receives GOAWAY with no active streams is marked final and never
+closed.  See ``claude-docs/connection-reuse-and-timeouts.md``.
+
+**Requests are bounded by default on Solr 10.**  ``:socket-timeout`` defaults to
+120000 ms and ``:connection-timeout`` to 10000 ms, overridable per connection.
+SolrJ's own defaults are 600000 and 60000, and its idle timeout is what it hands
+to the JDK client as a per-request timeout.  These bounds do arm before a
+connection exists -- they cover a connect that never completes and an HTTP/2
+preface that never finishes -- but they cannot rescue a client someone closed,
+which is why the reuse rules above matter more than the timeouts.
+
 **If you construct a SolrQuery yourself**, the class moved packages in Solr 10.
 Use ``(clojure-solr.impl/new-query (clojure-solr.impl/impl) "q")``, or pass a
 query string to ``search*`` and let the library build it.  This one stays on
