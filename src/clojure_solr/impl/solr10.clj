@@ -24,6 +24,7 @@
            (org.apache.solr.client.solrj SolrClient SolrRequest)
            (org.apache.solr.client.solrj.impl HttpJdkSolrClient HttpJdkSolrClient$Builder
                                               HttpSolrClientBase)
+           (org.apache.solr.common.util ExecutorUtil)
            (org.apache.solr.client.solrj.request SolrQuery)
            (org.apache.solr.client.solrj.response InputStreamResponseParser)))
 
@@ -128,12 +129,63 @@
    restores SolrJ's 60000."
   10000)
 
+(defonce ^:private request-thread-counter (java.util.concurrent.atomic.AtomicLong. 0))
+
+(defonce ^{:doc
+  "The ExecutorService every JDK Solr client runs its exchanges on.
+
+   SolrJ's own default here DEADLOCKS, and it is not a rare race -- four
+   concurrent requests through one client is enough, deterministically.
+   HttpJdkSolrClient.preparePutOrPost writes the request body into a
+   PipedOutputStream on this executor and hands the paired PipedInputStream to
+   the JDK client as BodyPublishers.ofInputStream; the same executor is then
+   given to HttpClient.Builder.executor, so the reads that DRAIN that pipe are
+   submitted to it too.  SolrJ builds it as
+
+     MDCAwareThreadPoolExecutor(4, 256, 60s, LinkedBlockingQueue(1024))
+
+   and a ThreadPoolExecutor only grows past its core size once the queue is
+   FULL -- so with 1024 slots the pool is a fixed 4 and maximumPoolSize 256 is
+   unreachable.  Four bodies larger than the pipe's 1KB buffer therefore occupy
+   all four threads in PipedOutputStream.write, the drains queue behind them
+   forever, and every caller parks in CompletableFuture.get.  No timeout fires:
+   the block is in Object.wait inside PipedInputStream, before the exchange
+   starts, so neither the connection nor the idle timeout is in scope.
+   Upstream: SOLR-17707, and
+   https://lists.apache.org/thread/m5yz199r8bv7qo7251cc42wr7rz16q6b, whose
+   reporter found the same threshold and the same remedy -- supply an executor.
+
+   Elastic and process-wide, which fixes the deadlock at its cause rather than
+   raising the threshold: newMDCAwareCachedThreadPool is a SynchronousQueue pool
+   with corePoolSize 0 and an unbounded maximum, so a task NEVER queues behind a
+   running one -- it takes an idle thread or gets a new one.  A stuck exchange
+   can then cost a thread (SOLR-17707 leaks one per send-side exception) without
+   costing throughput, and no client can starve another.  Idle threads reap
+   after 60s, so sharing costs nothing when quiet.
+
+   Sharing one pool across clients is also why this is never shut down, and that
+   is the second bug it closes.  HttpJdkSolrClient.close only shuts down an
+   executor it created ITSELF (shutdownExecutor is false whenever one is
+   supplied), so closing a client no longer tears down the executor another
+   thread's CompletableFuture is waiting to be completed through -- the hazard
+   described above the connection cache in clojure-solr.impl.  Threads are
+   daemons, so an unterminated pool cannot hold the JVM open."}
+  request-executor
+  (ExecutorUtil/newMDCAwareCachedThreadPool
+   (reify java.util.concurrent.ThreadFactory
+     (newThread [_ r]
+       (doto (Thread. r (str "clojure-solr-http-" (.incrementAndGet request-thread-counter)))
+         (.setDaemon true))))))
+
 (defn- jdk-client
   [url {:keys [ssl-trust-store socket-timeout connection-timeout
                max-connections-per-host default-collection http1?] :as opts}]
   (let [b (HttpJdkSolrClient$Builder. url)
         socket-timeout (or socket-timeout default-socket-timeout)
         connection-timeout (or connection-timeout default-connection-timeout)]
+    ;; Before anything else: SolrJ's default executor deadlocks at four
+    ;; concurrent requests.  See request-executor.
+    (.withExecutor b request-executor)
     (when default-collection (.withDefaultCollection b default-collection))
     (when ssl-trust-store
       (when-let [ctx (build-ssl-context opts)] (.withSSLContext b ctx)))
