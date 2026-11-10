@@ -9,6 +9,7 @@
   (:require [clj-time.core :as t])
   (:require [clj-time.coerce :as tcoerce])
   (:require [cheshire.core :as cheshire])
+  (:require [clojure-solr.json :as jsolr])
   (:use [clojure.test])
   (:use [clojure-solr])
   (:use [clojure-solr.security])
@@ -236,6 +237,36 @@
             :before 0
             :after  0}
            (first (filter #(= (:name %) "updated") (:facet-range-fields result)))))))
+
+(deftest test-json-facets-with-no-documents-have-no-buckets
+  ;; Solr's JSON Facet API leaves a facet out of the response when its domain
+  ;; holds no documents: a query that matches nothing comes back as just
+  ;; {"count":0}, and a bucket with a zero count carries no sub-facets.  Both
+  ;; used to throw NullPointerException out of process-facets.
+  (add-document! sample-doc)
+  (commit!)
+  (let [start (t/date-time 2015 02 26)
+        end (t/date-time 2015 03 01)]
+    (testing "a query that matches nothing"
+      (is (= {"updated" [] "type" []}
+             (->> (jsolr/query "title:nomatch"
+                               {:limit 0
+                                :facets {"updated" (jsolr/range-facet
+                                                    "updated" start end "+1DAY"
+                                                    :sub-facets {"type" (jsolr/terms-facet "type")})
+                                         "type" (jsolr/terms-facet "type")}})
+                  :facets
+                  (into {} (map (juxt :name (comp vec :values))))))))
+    (testing "a bucket with no documents"
+      (is (= [[0 []] [1 [{:value "pdf" :count 1}]] [0 []]]
+             (->> (jsolr/query "*:*"
+                               {:limit 0
+                                :facets {"updated" (jsolr/range-facet
+                                                    "updated" start end "+1DAY"
+                                                    :min-count 0
+                                                    :sub-facets {"type" (jsolr/terms-facet "type")})}})
+                  :facets first :values
+                  (mapv (fn [bucket] [(:count bucket) (vec (-> bucket :facets first :values))]))))))))
 
 
 (deftest test-pivot-faceting

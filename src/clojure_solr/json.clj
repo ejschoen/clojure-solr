@@ -133,8 +133,11 @@
   [^SimpleOrderedMap facets facet-map {:keys [facet-hier-sep] :as flags}]
   (doall
    (for [[facet-name facet-description] facet-map]
+     ;; Solr leaves a facet out of the response when its domain holds no
+     ;; documents: a query that matches nothing returns only {"count":0}, and a
+     ;; zero-count bucket carries no sub-facets.  Either way there are no buckets.
      (let [^SimpleOrderedMap facet-response (.get facets facet-name)
-           ^java.util.List buckets (.get facet-response "buckets")]
+           ^java.util.List buckets (when facet-response (.get facet-response "buckets"))]
        {:name facet-name
         :values (for [^SimpleOrderedMap bucket buckets
                       :let [val (.get bucket "val")]]
